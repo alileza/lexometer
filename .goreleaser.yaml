@@ -49,13 +49,11 @@ release:
     name: tokometer
 
 # Publishes a formula to github.com/alileza/homebrew-tap so users can
-# `brew install alileza/tap/tokometer`. Requires a HOMEBREW_TAP_TOKEN secret
+# `brew install alileza/tap/tokometer`. Uses the HOMEBREW_TAP_TOKEN secret
 # (a PAT with contents:write on the tap repo) — cross-repo pushes can't use the
-# default GITHUB_TOKEN. Disabled until that secret is set; flip skip_upload to
-# false (or delete it) once it exists to publish the formula on the next release.
+# default GITHUB_TOKEN.
 brews:
   - name: tokometer
-    skip_upload: "true"
     repository:
       owner: alileza
       name: homebrew-tap
