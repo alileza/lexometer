@@ -57,7 +57,13 @@ func main() {
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
 		hub.Upgrade(w, r, func(conn net.Conn) { hub.Send(conn, summaryJSON()) })
 	})
-	mux.HandleFunc("POST /v1/logs", func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); okJSON(w) })
+	mux.HandleFunc("POST /v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		body, err := readBody(r)
+		if err == nil {
+			store.IngestLogs(body) // best-effort; a malformed export must not error the exporter
+		}
+		okJSON(w)
+	})
 	mux.HandleFunc("POST /v1/traces", func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); okJSON(w) })
 
 	mux.HandleFunc("GET /api/summary", func(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +73,10 @@ func main() {
 	mux.HandleFunc("GET /api/live", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(store.Live())
+	})
+	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Events())
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
@@ -118,6 +128,7 @@ Point Claude Code at it (add to your shell profile):
 
   export CLAUDE_CODE_ENABLE_TELEMETRY=1
   export OTEL_METRICS_EXPORTER=otlp
+  export OTEL_LOGS_EXPORTER=otlp
   export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost%[1]s
   export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"   # flip to true when you enable an intervention

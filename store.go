@@ -25,6 +25,9 @@ type Store struct {
 
 	LastReceived int64 `json:"lastReceived"`
 
+	// recent telemetry log events (user_prompt, api_request, …), oldest first
+	EventLog []Event `json:"events"`
+
 	// running total per metric, rebuilt from Buckets on load; feeds /api/live
 	totals map[string]float64
 
@@ -317,4 +320,97 @@ func (s *Store) Ingest(body []byte) error {
 		}
 	}
 	return nil
+}
+
+// ---- OTLP log events (user_prompt, api_request, …) ----
+
+// Event is one Claude Code telemetry log record, kept verbatim so the
+// dashboard can build per-prompt views without the server guessing at
+// attribute names.
+type Event struct {
+	T       int64             `json:"t"` // unix millis
+	Session string            `json:"session"`
+	Name    string            `json:"name"`
+	Attrs   map[string]string `json:"attrs"`
+}
+
+const maxEvents = 5000
+
+type otlpLogRecord struct {
+	TimeUnixNano         string       `json:"timeUnixNano"`
+	ObservedTimeUnixNano string       `json:"observedTimeUnixNano"`
+	Body                 otlpAnyValue `json:"body"`
+	Attributes           []otlpKV     `json:"attributes"`
+}
+
+type otlpLogsExport struct {
+	ResourceLogs []struct {
+		Resource struct {
+			Attributes []otlpKV `json:"attributes"`
+		} `json:"resource"`
+		ScopeLogs []struct {
+			LogRecords []otlpLogRecord `json:"logRecords"`
+		} `json:"scopeLogs"`
+	} `json:"resourceLogs"`
+}
+
+// IngestLogs parses an OTLP/HTTP JSON logs export and keeps each record as an
+// Event (ring-buffered at maxEvents).
+func (s *Store) IngestLogs(body []byte) error {
+	var ex otlpLogsExport
+	if err := json.Unmarshal(body, &ex); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rl := range ex.ResourceLogs {
+		res := map[string]string{}
+		for _, kv := range rl.Resource.Attributes {
+			res[kv.Key] = kv.Value.String()
+		}
+		for _, sl := range rl.ScopeLogs {
+			for _, lr := range sl.LogRecords {
+				attrs := map[string]string{}
+				for k, v := range res {
+					attrs[k] = v
+				}
+				for _, kv := range lr.Attributes {
+					attrs[kv.Key] = kv.Value.String()
+				}
+				name := attrs["event.name"]
+				if name == "" {
+					name = lr.Body.String()
+				}
+				if name == "" {
+					continue
+				}
+				tsStr := lr.TimeUnixNano
+				if tsStr == "" || tsStr == "0" {
+					tsStr = lr.ObservedTimeUnixNano
+				}
+				ts, _ := strconv.ParseInt(tsStr, 10, 64)
+				if ts == 0 {
+					ts = time.Now().UnixNano()
+				}
+				session := attrs["session.id"]
+				s.EventLog = append(s.EventLog, Event{T: ts / 1e6, Session: session, Name: name, Attrs: attrs})
+			}
+		}
+	}
+	if len(s.EventLog) > maxEvents {
+		s.EventLog = s.EventLog[len(s.EventLog)-maxEvents:]
+	}
+	if len(ex.ResourceLogs) > 0 {
+		s.dirty = true
+	}
+	return nil
+}
+
+// Events returns a copy of the retained log events, oldest first.
+func (s *Store) Events() []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Event, len(s.EventLog))
+	copy(out, s.EventLog)
+	return out
 }

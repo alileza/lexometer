@@ -128,7 +128,7 @@ interface SeriesDef { label: string; color: string; fill?: boolean; bars?: boole
 let plots: uPlot[] = [];
 
 function chartPanel(parent: Element, title: string, desc: string, data: uPlot.AlignedData,
-                    defs: SeriesDef[], fmt: (v: number | null) => string, height = 220): void {
+                    defs: SeriesDef[], fmt: (v: number | null) => string, height = 220): uPlot {
   const panel = document.createElement('div');
   panel.className = 'panel';
   panel.innerHTML = `<div class="panel-title">${title} <span class="desc">${desc}</span></div><div class="panel-body"></div>`;
@@ -168,6 +168,7 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
 
   const u = new uPlot(opts, data, body);
   plots.push(u);
+  return u;
 }
 
 function statPanel(value: string, label: string, cls = ''): string {
@@ -215,6 +216,98 @@ function donutPanel(parent: Element, title: string, desc: string,
 
 let lastSummary: Summary | null = null;
 
+// ---- per-prompt performance from telemetry log events ----
+interface Ev { t: number; session: string; name: string; attrs: Record<string, string> }
+let eventsCache: Ev[] = [];
+let evPlots: uPlot[] = [];
+
+const num = (a: Record<string, string>, ...keys: string[]): number => {
+  for (const k of keys) {
+    const v = parseFloat(a[k] ?? '');
+    if (!isNaN(v)) return v;
+  }
+  return 0;
+};
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const hhmmss = (ms: number) => new Date(ms).toLocaleTimeString();
+
+async function refreshEvents() {
+  try {
+    const r = await fetch('/api/events');
+    eventsCache = (await r.json() as Ev[] | null) ?? [];
+    renderEvents();
+  } catch { /* server away */ }
+}
+
+function renderEvents() {
+  const root = document.getElementById('events-root');
+  if (!root) return;
+  for (const p of evPlots) { p.destroy(); plots = plots.filter(x => x !== p); }
+  evPlots = [];
+  root.innerHTML = '';
+
+  const evs = [...eventsCache].sort((a, b) => a.t - b.t);
+  const reqs = evs.filter(e => e.name.includes('api_request'));
+  if (reqs.length === 0) {
+    root.innerHTML = `<div class="panel"><div class="panel-title">Per-prompt performance
+      <span class="desc">needs the events stream — add <code>export OTEL_LOGS_EXPORTER=otlp</code> to your shell profile and restart your Claude Code session</span></div></div>`;
+    return;
+  }
+
+  const ctxOf = (a: Record<string, string>) =>
+    num(a, 'input_tokens') + num(a, 'cache_read_tokens') + num(a, 'cache_creation_tokens');
+
+  // context build-up: tokens sent per API request — the staircase you pay for
+  const recent = reqs.slice(-300);
+  evPlots.push(chartPanel(root, 'Context sent per request',
+    'input + cache tokens on each API call — how the context builds up',
+    [recent.map(e => e.t / 1000), recent.map(e => ctxOf(e.attrs))] as uPlot.AlignedData,
+    [{ label: 'context tokens', color: ORANGE, fill: true }], fmtTok, 180));
+
+  // group api_requests under the user_prompt that caused them, per session
+  interface Group { t: number; text: string; len: number; calls: number; ctxMax: number; out: number; cost: number; durMs: number }
+  const groups: Group[] = [];
+  const current = new Map<string, Group>();
+  for (const e of evs) {
+    if (e.name.includes('user_prompt')) {
+      const g: Group = {
+        t: e.t, text: e.attrs['prompt'] ?? '', len: num(e.attrs, 'prompt_length'),
+        calls: 0, ctxMax: 0, out: 0, cost: 0, durMs: 0,
+      };
+      groups.push(g);
+      current.set(e.session, g);
+    } else if (e.name.includes('api_request')) {
+      const g = current.get(e.session);
+      if (!g) continue;
+      g.calls++;
+      g.ctxMax = Math.max(g.ctxMax, ctxOf(e.attrs));
+      g.out += num(e.attrs, 'output_tokens');
+      g.cost += num(e.attrs, 'cost_usd', 'cost');
+      g.durMs += num(e.attrs, 'duration_ms');
+    }
+  }
+
+  const latest = groups.slice(-25).reverse();
+  if (latest.length > 0) {
+    const table = document.createElement('div');
+    table.className = 'panel';
+    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">what each prompt actually cost — context re-sent, output produced, latency</span></div>
+      <div class="panel-body"><table>
+      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Context sent</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Duration</th></tr>
+      ${latest.map(g => `<tr>
+        <td>${hhmmss(g.t)}</td>
+        <td>${g.text ? esc(g.text.slice(0, 70)) + (g.text.length > 70 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
+        <td class="num">${g.calls}</td>
+        <td class="num">${fmtTok(g.ctxMax)}</td>
+        <td class="num">${fmtTok(g.out)}</td>
+        <td class="num">${g.cost >= 0.005 ? fmtUSD(g.cost) : '$' + g.cost.toFixed(3)}</td>
+        <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
+      </tr>`).join('')}
+      </table></div>`;
+    root.appendChild(table);
+  }
+}
+
 function render(s: Summary) {
   lastSummary = s;
   const rows = s.rows ?? [];
@@ -231,6 +324,7 @@ function render(s: Summary) {
     app.innerHTML = `<div id="empty"><strong>No telemetry yet.</strong> Point Claude Code at lexometer and start a session:
 <pre>export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"</pre>
@@ -265,6 +359,13 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   chartPanel(app, 'Cost', `USD per hour · ${activeRange}`,
     hourly(inRange, tMin, tMax, [isCost]),
     [{ label: 'cost', color: GREEN, fill: true }], fmtUSD);
+
+  // per-prompt views live here, filled from /api/events (survives async refresh)
+  const evRoot = document.createElement('div');
+  evRoot.id = 'events-root';
+  app.appendChild(evRoot);
+  renderEvents();
+  void refreshEvents();
 
   // model breakdown: share donut + per-model series, Grafana-dashboard style
   const halfRow = document.createElement('div');
