@@ -1,0 +1,27 @@
+{
+  "name": "lexometer",
+  "version": "1.0.0",
+  "description": "A single binary that watches your Claude Code usage. It speaks OTLP natively — no Prometheus, no Grafana, no Docker, no collector. One process, one port, one dashboard.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alileza/lexometer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/alileza/lexometer/issues"
+  },
+  "homepage": "https://github.com/alileza/lexometer#readme",
+  "dependencies": {
+    "uplot": "^1.6.32"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

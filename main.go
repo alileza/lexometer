@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-//go:embed web/index.html web/dist/app.js
+//go:embed web/index.html web/dist
 var webFS embed.FS
 
 func main() {
@@ -66,9 +66,18 @@ func main() {
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
-	mux.HandleFunc("GET /dist/app.js", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := webFS.ReadFile("web/dist/app.js")
-		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	mux.HandleFunc("GET /dist/", func(w http.ResponseWriter, r *http.Request) {
+		b, err := webFS.ReadFile("web" + r.URL.Path)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		switch filepath.Ext(r.URL.Path) {
+		case ".js":
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		case ".css":
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		}
 		w.Write(b)
 	})
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -90,11 +99,11 @@ func main() {
 		}
 	}()
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		<-sig
+		s := <-sig
 		if err := store.Save(); err != nil {
-			log.Printf("save on exit: %v", err)
+			log.Printf("save on %v: %v", s, err)
 		}
 		os.Exit(0)
 	}()

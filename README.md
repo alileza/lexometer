@@ -47,8 +47,14 @@ percent change — your own measured number, not a vendor claim.
 - The dashboard updates live over WebSocket (`/ws`, hand-rolled RFC 6455,
   server-push only): a snapshot on connect, a push after every telemetry batch,
   automatic fallback to polling if the socket drops.
-- Zero Go dependencies; the dashboard is TypeScript compiled to a single embedded
-  JS file. `make build` rebuilds both.
+- Zero Go dependencies; the dashboard is TypeScript rendered with
+  [uPlot](https://github.com/leeoniya/uPlot) — the same charting library Grafana's
+  Time series panel uses — bundled and embedded in the binary. Grafana-style
+  behavior included: shared crosshair with a multi-series tooltip, click-to-toggle
+  legend, drag-to-zoom (double-click to reset), and 6h/24h/7d/30d/All range
+  presets. `make build` rebuilds both.
+- State is saved every 30 seconds and on SIGINT/SIGTERM/SIGHUP, so a terminated
+  process picks up exactly where it left off.
 
 ## Why not Prometheus + Grafana?
 

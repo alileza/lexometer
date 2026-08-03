@@ -1,47 +1,48 @@
-// lexometer dashboard — fetches /api/summary and renders SVG charts.
+// lexometer dashboard — Grafana-style panels rendered with uPlot (the same
+// charting library Grafana's Time series panel uses).
+
+import uPlot from 'uplot';
+import 'uplot/dist/uPlot.min.css';
 
 interface Row { t: number; metric: string; labels: Record<string, string>; value: number }
 interface Summary { rows: Row[]; metrics: string[]; lastReceived: number; now: number }
 
-const BLUE = '#0057ff', RED = '#ff4034', INK = '#0a0d12', MUTE = '#6b7280', FAINT = '#9ca4ad',
-      GRID = '#eceef1', AXIS = '#d3d7dd';
-// token types, fixed order + fixed shades of the blue ramp (identity is labeled, not color-alone)
+// Grafana classic palette, fixed assignment per token type
+const GREEN = '#73BF69', BLUE = '#5794F2', YELLOW = '#FADE2A', ORANGE = '#FF9830', RED = '#F2495C';
 const TOKEN_TYPES: [string, string][] = [
-  ['cacheRead', BLUE], ['cacheCreation', '#6b96ff'], ['output', '#a4bfff'], ['input', '#d4e0ff'],
+  ['cacheRead', BLUE], ['cacheCreation', GREEN], ['output', YELLOW], ['input', ORANGE],
 ];
-const NS = 'http://www.w3.org/2000/svg';
+const TEXT_DIM = 'rgba(204,204,220,0.65)';
+const GRID = 'rgba(204,204,220,0.07)';
+const HOUR = 3600;
 
 const app = document.getElementById('app')!;
 const tip = document.getElementById('tip')!;
 const statusEl = document.getElementById('status')!;
 const statusText = document.getElementById('status-text')!;
+const rangesEl = document.getElementById('ranges')!;
 
-function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>, parent?: Element): SVGElementTagNameMap[K] {
-  const e = document.createElementNS(NS, tag);
-  for (const k in attrs) e.setAttribute(k, String(attrs[k]));
-  parent?.appendChild(e);
-  return e;
-}
-function txt(parent: Element, x: number, y: number, s: string, attrs: Record<string, string | number> = {}) {
-  const e = el('text', { x, y, 'font-size': 11, fill: MUTE, ...attrs }, parent);
-  e.textContent = s;
-  return e;
-}
-function hover(target: Element, html: string) {
-  target.addEventListener('mousemove', (ev) => {
-    const m = ev as MouseEvent;
-    tip.innerHTML = html;
-    tip.style.opacity = '1';
-    tip.style.left = Math.min(m.clientX + 14, window.innerWidth - tip.offsetWidth - 12) + 'px';
-    tip.style.top = (m.clientY + 16) + 'px';
-  });
-  target.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });
-}
-const fmtUSD = (v: number) => '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
-const fmtTok = (v: number) =>
-  v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' :
-  v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(Math.round(v));
+const fmtUSD = (v: number | null) => v == null ? '–' : '$' + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+const fmtTok = (v: number | null) =>
+  v == null ? '–' :
+  v >= 1e9 ? (v / 1e9).toFixed(2) + ' B' : v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' :
+  v >= 1e3 ? (v / 1e3).toFixed(1) + ' K' : String(Math.round(v));
 const day = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+
+// ---- time range picker (Grafana-style presets) ----
+const RANGES: [string, number][] = [['6h', 6 * HOUR], ['24h', 24 * HOUR], ['7d', 7 * 86400], ['30d', 30 * 86400], ['All', 0]];
+let activeRange = '7d';
+for (const [name] of RANGES) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.className = name === activeRange ? 'active' : '';
+  b.onclick = () => {
+    activeRange = name;
+    rangesEl.querySelectorAll('button').forEach(x => x.className = x.textContent === name ? 'active' : '');
+    if (lastSummary) render(lastSummary);
+  };
+  rangesEl.appendChild(b);
+}
 
 function sum(rows: Row[], pred: (r: Row) => boolean): number {
   let s = 0;
@@ -54,49 +55,125 @@ function byDay(rows: Row[], pred: (r: Row) => boolean): Map<string, number> {
   return m;
 }
 
-function stat(value: string, label: string): string {
-  return `<div class="stat"><div class="value">${value}</div><div class="label">${label}</div></div>`;
-}
-
-function dailyBars(svg: SVGSVGElement, days: string[], series: { name: string; color: string; data: Map<string, number> }[], fmt: (v: number) => string) {
-  const W = 1000, H = 240, m = { t: 14, r: 10, b: 30, l: 52 };
-  svg.setAttribute('width', String(W)); svg.setAttribute('height', String(H));
-  const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const totals = days.map(d => series.reduce((a, s) => a + (s.data.get(d) ?? 0), 0));
-  const maxY = Math.max(...totals, 1e-9) * 1.15;
-  const step = iw / Math.max(days.length, 1);
-  const bw = Math.max(4, Math.min(38, step - 4));
-  const y = (v: number) => m.t + ih - (v / maxY) * ih;
-
-  for (let i = 0; i <= 3; i++) {
-    const v = (maxY / 3) * i;
-    el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: i === 0 ? AXIS : GRID }, svg);
-    txt(svg, m.l - 8, y(v) + 4, fmt(v), { 'text-anchor': 'end', fill: FAINT });
+// Aligned hourly series over [t0, t1] for uPlot: xs plus one values array per bucket fn.
+function hourly(rows: Row[], t0: number, t1: number, buckets: ((r: Row) => boolean)[]): uPlot.AlignedData {
+  const xs: number[] = [];
+  for (let t = t0; t <= t1; t += HOUR) xs.push(t);
+  const idx = new Map<number, number>();
+  xs.forEach((t, i) => idx.set(t, i));
+  const series = buckets.map(() => xs.map(() => 0) as (number | null)[]);
+  for (const r of rows) {
+    const i = idx.get(r.t);
+    if (i === undefined) continue;
+    buckets.forEach((pred, s) => { if (pred(r)) series[s]![i] = (series[s]![i] ?? 0) + r.value; });
   }
-  days.forEach((d, i) => {
-    const x = m.l + i * step + (step - bw) / 2;
-    let base = m.t + ih;
-    const parts = series.map(s => `${s.name}: ${fmt(s.data.get(d) ?? 0)}`).join('<br>');
-    for (const s of series) {
-      const v = s.data.get(d) ?? 0;
-      if (v <= 0) continue;
-      const h = (v / maxY) * ih;
-      el('rect', { x, y: base - h, width: bw, height: Math.max(h - 1.5, 0.5), rx: 3, fill: s.color }, svg);
-      base -= h;
-    }
-    if (days.length <= 21 || i % Math.ceil(days.length / 14) === 0)
-      txt(svg, x + bw / 2, H - 10, d.slice(5), { 'text-anchor': 'middle', fill: FAINT });
-    const hit = el('rect', { x: x - 2, y: m.t, width: bw + 4, height: ih, fill: 'transparent' }, svg);
-    hover(hit, `<div class="t">${d}</div><div class="v">${series.length > 1 ? parts : fmt(totals[i])}</div>`);
-  });
+  return [xs, ...series] as uPlot.AlignedData;
 }
+
+// ---- Grafana-style shared tooltip as a uPlot plugin ----
+function tooltipPlugin(fmt: (v: number | null) => string): uPlot.Plugin {
+  return {
+    hooks: {
+      setCursor: (u: uPlot) => {
+        const { left, top, idx } = u.cursor;
+        if (idx == null || left == null || left < 0 || top == null || top < 0) {
+          tip.style.display = 'none';
+          return;
+        }
+        const x = u.data[0][idx]!;
+        let rowsHTML = '';
+        for (let s = 1; s < u.series.length; s++) {
+          const srs = u.series[s]!;
+          if (!srs.show) continue;
+          const v = (u.data[s] as (number | null)[])[idx] ?? null;
+          const color = typeof srs.stroke === 'string' ? srs.stroke : '';
+          rowsHTML += `<div class="tr"><span class="sw" style="background:${color}"></span>` +
+            `<span class="nm">${srs.label}</span><span class="vl">${fmt(v)}</span></div>`;
+        }
+        tip.innerHTML = `<div class="tt">${new Date(x * 1000).toLocaleString(undefined,
+          { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>` + rowsHTML;
+        tip.style.display = 'block';
+        const rect = u.over.getBoundingClientRect();
+        let px = rect.left + left + 14;
+        if (px + tip.offsetWidth > window.innerWidth - 8) px = rect.left + left - tip.offsetWidth - 14;
+        tip.style.left = px + 'px';
+        tip.style.top = Math.min(rect.top + top + 14, window.innerHeight - tip.offsetHeight - 8) + 'px';
+      },
+    },
+  };
+}
+
+const axisDefaults = (fmt: (v: number | null) => string): uPlot.Axis[] => [
+  {
+    stroke: TEXT_DIM, font: '11px Inter, sans-serif',
+    grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID, width: 1 },
+  },
+  {
+    stroke: TEXT_DIM, font: '11px Inter, sans-serif', size: 58,
+    grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID, width: 1 },
+    values: (_u: uPlot, ticks: number[]) => ticks.map(v => fmt(v)),
+  },
+];
+
+interface SeriesDef { label: string; color: string; fill?: boolean; bars?: boolean }
+
+let plots: uPlot[] = [];
+
+function chartPanel(parent: Element, title: string, desc: string, data: uPlot.AlignedData,
+                    defs: SeriesDef[], fmt: (v: number | null) => string, height = 220): void {
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.innerHTML = `<div class="panel-title">${title} <span class="desc">${desc}</span></div><div class="panel-body"></div>`;
+  parent.appendChild(panel);
+  const body = panel.querySelector('.panel-body') as HTMLElement;
+
+  const series: uPlot.Series[] = [
+    {},
+    ...defs.map((d): uPlot.Series => ({
+      label: d.label,
+      stroke: d.color,
+      width: 2,
+      points: { show: false },
+      ...(d.fill ? { fill: d.color + '2e' } : {}), // ~18% alpha fill, Grafana default look
+      ...(d.bars ? { paths: uPlot.paths.bars!({ size: [0.6, 100] }), fill: d.color + '99' } : {}),
+    })),
+  ];
+
+  const opts: uPlot.Options = {
+    width: Math.max(320, body.clientWidth || 1120),
+    height,
+    series,
+    legend: { live: false },
+    cursor: {
+      drag: { x: true, y: false },
+      points: { size: 6, width: 2 },
+    },
+    scales: { x: { time: true } },
+    axes: axisDefaults(fmt),
+    plugins: [tooltipPlugin(fmt)],
+  };
+
+  const u = new uPlot(opts, data, body);
+  plots.push(u);
+}
+
+function statPanel(value: string, label: string, cls = ''): string {
+  return `<div class="panel stat-panel"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
+}
+
+let lastSummary: Summary | null = null;
 
 function render(s: Summary) {
+  lastSummary = s;
   const rows = s.rows ?? [];
   const live = s.lastReceived > 0 && s.now - s.lastReceived < 120;
   statusEl.className = live ? 'live' : '';
   statusText.textContent = s.lastReceived === 0 ? 'waiting for telemetry…'
     : `last data ${Math.max(0, s.now - s.lastReceived)}s ago`;
+
+  for (const p of plots) p.destroy();
+  plots = [];
+  tip.style.display = 'none';
 
   if (rows.length === 0) {
     app.innerHTML = `<div id="empty"><strong>No telemetry yet.</strong> Point Claude Code at lexometer and start a session:
@@ -114,27 +191,31 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   const isSession = (r: Row) => r.metric === 'claude_code.session.count';
   const today = day(s.now);
 
-  const totalCost = sum(rows, isCost);
-  const costToday = sum(rows, r => isCost(r) && day(r.t) === today);
-  const totalTok = sum(rows, isTok);
-  const sessions = sum(rows, isSession);
+  // time window from range preset
+  const rangeSec = RANGES.find(r => r[0] === activeRange)![1];
+  const tMax = Math.ceil(s.now / HOUR) * HOUR;
+  const tMinData = Math.min(...rows.map(r => r.t));
+  const tMin = rangeSec === 0 ? tMinData : Math.max(tMinData, tMax - rangeSec);
+  const inRange = rows.filter(r => r.t >= tMin);
 
-  const days = [...new Set(rows.filter(r => isCost(r) || isTok(r)).map(r => day(r.t)))].sort();
+  app.innerHTML = `<div class="row stats">`
+    + statPanel(fmtUSD(sum(rows, isCost)), 'total cost recorded', 'green')
+    + statPanel(fmtUSD(sum(rows, r => isCost(r) && day(r.t) === today)), 'cost today', 'blue')
+    + statPanel(fmtTok(sum(rows, isTok)), 'total tokens')
+    + statPanel(String(Math.round(sum(rows, isSession))), 'sessions')
+    + `</div>`;
 
-  let html = '<div class="stats">'
-    + stat(fmtUSD(totalCost), 'total cost recorded')
-    + stat(fmtUSD(costToday), 'cost today')
-    + stat(fmtTok(totalTok), 'total tokens')
-    + stat(String(Math.round(sessions)), 'sessions')
-    + '</div>';
+  chartPanel(app, 'Cost', `USD per hour · ${activeRange}`,
+    hourly(inRange, tMin, tMax, [isCost]),
+    [{ label: 'cost', color: GREEN, fill: true }], fmtUSD);
 
-  html += `<div class="card"><h3>Cost per day</h3><div class="sub">USD, from claude_code.cost.usage</div>
-    <div class="chart-scroll"><svg id="c-cost"></svg></div></div>`;
+  chartPanel(app, 'Token usage', `tokens per hour by type · ${activeRange}`,
+    hourly(inRange, tMin, tMax, TOKEN_TYPES.map(([n]) => (r: Row) => isTok(r) && r.labels['type'] === n)),
+    TOKEN_TYPES.map(([n, c]) => ({ label: n, color: c, fill: true })), fmtTok);
 
-  html += `<div class="card"><h3>Tokens per day, by type</h3>
-    <div class="legend">${TOKEN_TYPES.map(([n, c]) =>
-      `<span class="key"><span class="swatch" style="background:${c}"></span>${n}</span>`).join('')}</div>
-    <div class="chart-scroll"><svg id="c-tok"></svg></div></div>`;
+  chartPanel(app, 'Sessions', `sessions started per hour · ${activeRange}`,
+    hourly(inRange, tMin, tMax, [isSession]),
+    [{ label: 'sessions', color: BLUE, bars: true }], v => v == null ? '–' : String(Math.round(v)), 140);
 
   // before/after comparison when both phases have data
   const phases = [...new Set(rows.map(r => r.labels['skills_enabled']).filter(Boolean))];
@@ -146,28 +227,33 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     };
     const before = avg('false'), after = avg('true');
     const delta = before > 0 ? ((after - before) / before) * 100 : 0;
-    html += `<div class="card"><h3>Before vs after — skills_enabled</h3>
-      <div class="sub">average cost per active day in each phase; the honest number, not a vendor claim</div>
-      <div class="stats" style="grid-template-columns:repeat(3,1fr)">
-      ${stat(fmtUSD(before), 'avg $/day · skills_enabled=false')}
-      ${stat(fmtUSD(after), 'avg $/day · skills_enabled=true')}
-      ${stat((delta <= 0 ? '' : '+') + delta.toFixed(1) + '%', 'change (negative = saving)')}
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.innerHTML = `<div class="panel-title">Before vs after <span class="desc">average cost per active day, split on skills_enabled — your measured number, not a vendor claim</span></div>
+      <div class="panel-body"><div class="row stats" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
+      ${statPanel(fmtUSD(before), 'avg $/day · skills_enabled=false')}
+      ${statPanel(fmtUSD(after), 'avg $/day · skills_enabled=true')}
+      ${statPanel((delta <= 0 ? '' : '+') + delta.toFixed(1) + '%', 'change (negative = saving)', delta <= 0 ? 'green' : 'red')}
       </div></div>`;
+    app.appendChild(panel);
   }
 
   // everything received, so nothing is silently hidden
-  html += `<div class="card"><h3>All metrics received</h3><div class="sub">totals across the whole recording window</div>
-    <table><tr><th>Metric</th><th class="num">Total</th></tr>
-    ${s.metrics.map(m => `<tr><td>${m}</td><td class="num">${fmtTok(sum(rows, r => r.metric === m))}</td></tr>`).join('')}
+  const table = document.createElement('div');
+  table.className = 'panel';
+  table.innerHTML = `<div class="panel-title">All metrics received <span class="desc">totals across the whole recording window</span></div>
+    <div class="panel-body"><table><tr><th>Metric</th><th class="num">Total</th></tr>
+    ${(s.metrics ?? []).map(m => `<tr><td>${m}</td><td class="num">${fmtTok(sum(rows, r => r.metric === m))}</td></tr>`).join('')}
     </table></div>`;
-
-  app.innerHTML = html;
-
-  dailyBars(document.getElementById('c-cost') as unknown as SVGSVGElement, days,
-    [{ name: 'cost', color: BLUE, data: byDay(rows, isCost) }], fmtUSD);
-  dailyBars(document.getElementById('c-tok') as unknown as SVGSVGElement, days,
-    TOKEN_TYPES.map(([n, c]) => ({ name: n, color: c, data: byDay(rows, r => isTok(r) && r.labels['type'] === n) })), fmtTok);
+  app.appendChild(table);
 }
+
+window.addEventListener('resize', () => {
+  for (const p of plots) {
+    const body = p.root.closest('.panel')?.querySelector('.panel-body') as HTMLElement | null;
+    if (body) p.setSize({ width: Math.max(320, body.clientWidth), height: p.height });
+  }
+});
 
 async function tick() {
   try {
