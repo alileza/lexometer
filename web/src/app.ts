@@ -24,7 +24,6 @@ const tip = document.getElementById('tip')!;
 const statusEl = document.getElementById('status')!;
 const statusText = document.getElementById('status-text')!;
 
-const fmtUSD = (v: number | null) => v == null ? '–' : '$' + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
 const fmtTok = (v: number | null) =>
   v == null ? '–' :
   v >= 1e9 ? (v / 1e9).toFixed(2) + ' B' : v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' :
@@ -334,7 +333,7 @@ function renderEvents() {
 
   // group api_requests + tool events under the user_prompt that caused them, per session
   interface Group {
-    t: number; text: string; len: number; calls: number; cost: number; durMs: number;
+    t: number; text: string; len: number; calls: number; durMs: number;
     cr: number; cc: number; inp: number; out: number; tools: Map<string, number>;
   }
   const groups: Group[] = [];
@@ -343,7 +342,7 @@ function renderEvents() {
     if (e.name.includes('user_prompt')) {
       const g: Group = {
         t: e.t, text: promptText(e.attrs), len: num(e.attrs, 'prompt_length'),
-        calls: 0, cost: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
+        calls: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
       };
       groups.push(g);
       current.set(e.session, g);
@@ -356,7 +355,6 @@ function renderEvents() {
         g.cc += num(e.attrs, 'cache_creation_tokens');
         g.inp += num(e.attrs, 'input_tokens');
         g.out += num(e.attrs, 'output_tokens');
-        g.cost += num(e.attrs, 'cost_usd', 'cost');
         g.durMs += num(e.attrs, 'duration_ms');
       } else if (e.name.includes('tool_result') || e.name.includes('tool_decision')) {
         const tn = e.attrs['tool_name'] ?? e.attrs['name'] ?? 'tool';
@@ -390,9 +388,11 @@ function renderEvents() {
   if (latest.length > 0) {
     const table = document.createElement('div');
     table.className = 'panel';
-    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">what each prompt actually cost, and where its tokens went (hover the bar for the split)</span></div>
-      <div class="panel-body"><table>
-      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th>Distribution</th><th>Tools</th><th class="num">Cost</th><th class="num">Duration</th></tr>
+    const legend = TOKEN_TYPES.map(([n, c]) =>
+      `<span class="key" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px"><span style="width:11px;height:4px;border-radius:1px;background:${c};display:inline-block"></span>${n}</span>`).join('');
+    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">where each prompt's tokens went — cacheRead is context re-sent from earlier turns (hover the bar for the split)</span></div>
+      <div class="panel-body"><div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div><table>
+      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th style="min-width:120px">Distribution</th><th>Tools</th><th class="num">Duration</th></tr>
       ${latest.map(g => `<tr>
         <td>${hhmmss(g.t)}</td>
         <td>${g.text ? esc(g.text.slice(0, 60)) + (g.text.length > 60 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
@@ -400,7 +400,6 @@ function renderEvents() {
         <td class="num">${fmtTok(g.cr + g.cc + g.inp + g.out)}</td>
         <td>${distBar(g)}</td>
         <td>${toolsCell(g)}</td>
-        <td class="num">${g.cost >= 0.005 ? fmtUSD(g.cost) : '$' + g.cost.toFixed(3)}</td>
         <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
       </tr>`).join('')}
       </table></div>`;
@@ -432,33 +431,37 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     return;
   }
 
-  const isCost = (r: Row) => r.metric === 'claude_code.cost.usage';
   const isTok = (r: Row) => r.metric === 'claude_code.token.usage';
   const isSession = (r: Row) => r.metric === 'claude_code.session.count';
   const isActive = (r: Row) => r.metric === 'claude_code.active_time.total';
   const today = day(s.now);
+  const tokType = (t: string) => (r: Row) => isTok(r) && r.labels['type'] === t;
 
   feedLive(sum(rows, isTok), s.now); // realtime panel rides the same summary
   const model = (r: Row) => r.labels['model'] ?? 'unknown';
-  const models = [...new Set(rows.filter(isCost).map(model))].sort();
+  const models = [...new Set(rows.filter(isTok).map(model))].sort();
   const modelColor = new Map(models.map((m, i) => [m, MODEL_PALETTE[i % MODEL_PALETTE.length]!]));
+
+  const totalTok = sum(rows, isTok);
+  const cacheRead = sum(rows, tokType('cacheRead'));
+  const cachePct = totalTok > 0 ? (cacheRead / totalTok * 100) : 0;
 
   const tMax = Math.ceil(s.now / HOUR) * HOUR;
   const tMin = Math.min(...rows.map(r => r.t));
   const inRange = rows;
 
   app.innerHTML = `<div class="row stats">`
-    + statPanel(fmtUSD(sum(rows, isCost)), 'total cost recorded', 'green')
-    + statPanel(fmtUSD(sum(rows, r => isCost(r) && day(r.t) === today)), 'cost today', 'blue')
-    + statPanel(fmtTok(sum(rows, isTok)), 'total tokens')
+    + statPanel(fmtTok(totalTok), 'total tokens', 'blue')
+    + statPanel(fmtTok(sum(rows, r => isTok(r) && day(r.t) === today)), 'tokens today')
+    + statPanel(cachePct.toFixed(1) + '%', 'cache reads (re-sent context)', cachePct > 90 ? 'red' : '')
     + statPanel(String(Math.round(sum(rows, isSession))), 'sessions')
     + statPanel(fmtDur(sum(rows, r => isActive(r) && day(r.t) === today)), 'active time today')
     + `</div><div id="setup-root"></div>`;
   renderSetup();
 
-  chartPanel(app, 'Cost', 'USD per hour',
-    hourly(inRange, tMin, tMax, [isCost]),
-    [{ label: 'cost', color: GREEN, fill: true }], fmtUSD);
+  chartPanel(app, 'Token usage', 'tokens per hour by type',
+    hourly(inRange, tMin, tMax, TOKEN_TYPES.map(([n]) => tokType(n))),
+    TOKEN_TYPES.map(([n, c]) => ({ label: n, color: c, fill: true })), fmtTok);
 
   // per-prompt views live here, filled from /api/events (survives async refresh)
   const evRoot = document.createElement('div');
@@ -467,24 +470,20 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   renderEvents();
   void refreshEvents();
 
-  // model breakdown: share donut + per-model series, Grafana-dashboard style
+  // breakdown donuts: tokens by type and by model
   const halfRow = document.createElement('div');
   halfRow.className = 'row half';
   app.appendChild(halfRow);
-  donutPanel(halfRow, 'Cost by model', 'share of total recorded cost',
-    models.map(m => [m, sum(rows, r => isCost(r) && model(r) === m), modelColor.get(m)!]), fmtUSD);
-  donutPanel(halfRow, 'Tokens by type', 'share of all tokens recorded',
-    TOKEN_TYPES.map(([n, c]) => [n, sum(rows, r => isTok(r) && r.labels['type'] === n), c]), fmtTok);
+  donutPanel(halfRow, 'Tokens by type', 'share of all tokens — cacheRead is re-sent context',
+    TOKEN_TYPES.map(([n, c]) => [n, sum(rows, tokType(n)), c]), fmtTok);
+  donutPanel(halfRow, 'Tokens by model', 'share of tokens across models',
+    models.map(m => [m, sum(rows, r => isTok(r) && model(r) === m), modelColor.get(m)!]), fmtTok);
 
-  if (models.length > 0) {
-    chartPanel(app, 'Cost by model', 'USD per hour per model',
-      hourly(inRange, tMin, tMax, models.map(m => (r: Row) => isCost(r) && model(r) === m)),
-      models.map(m => ({ label: m, color: modelColor.get(m)!, fill: true })), fmtUSD, 180);
+  if (models.length > 1) {
+    chartPanel(app, 'Tokens by model', 'tokens per hour per model',
+      hourly(inRange, tMin, tMax, models.map(m => (r: Row) => isTok(r) && model(r) === m)),
+      models.map(m => ({ label: m, color: modelColor.get(m)!, fill: true })), fmtTok, 180);
   }
-
-  chartPanel(app, 'Token usage', 'tokens per hour by type',
-    hourly(inRange, tMin, tMax, TOKEN_TYPES.map(([n]) => (r: Row) => isTok(r) && r.labels['type'] === n)),
-    TOKEN_TYPES.map(([n, c]) => ({ label: n, color: c, fill: true })), fmtTok);
 
   chartPanel(app, 'Sessions', 'sessions started per hour',
     hourly(inRange, tMin, tMax, [isSession]),
@@ -494,11 +493,11 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     hourly(inRange, tMin, tMax, [isActive]),
     [{ label: 'active', color: PURPLE, fill: true }], v => v == null ? '–' : fmtDur(v), 140);
 
-  // before/after comparison when both phases have data
+  // before/after comparison when both phases have data — on tokens per active day
   const phases = [...new Set(rows.map(r => r.labels['skills_enabled']).filter(Boolean))];
   if (phases.length >= 2) {
     const avg = (phase: string) => {
-      const m = byDay(rows, r => isCost(r) && r.labels['skills_enabled'] === phase);
+      const m = byDay(rows, r => isTok(r) && r.labels['skills_enabled'] === phase);
       const vals = [...m.values()];
       return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
     };
@@ -506,10 +505,10 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     const delta = before > 0 ? ((after - before) / before) * 100 : 0;
     const panel = document.createElement('div');
     panel.className = 'panel';
-    panel.innerHTML = `<div class="panel-title">Before vs after <span class="desc">average cost per active day, split on skills_enabled — your measured number, not a vendor claim</span></div>
+    panel.innerHTML = `<div class="panel-title">Before vs after <span class="desc">average tokens per active day, split on skills_enabled — your measured number, not a vendor claim</span></div>
       <div class="panel-body"><div class="row stats" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
-      ${statPanel(fmtUSD(before), 'avg $/day · skills_enabled=false')}
-      ${statPanel(fmtUSD(after), 'avg $/day · skills_enabled=true')}
+      ${statPanel(fmtTok(before), 'avg tokens/day · skills_enabled=false')}
+      ${statPanel(fmtTok(after), 'avg tokens/day · skills_enabled=true')}
       ${statPanel((delta <= 0 ? '' : '+') + delta.toFixed(1) + '%', 'change (negative = saving)', delta <= 0 ? 'green' : 'red')}
       </div></div>`;
     app.appendChild(panel);
