@@ -1,2 +1,3 @@
-lexometer
+tokometer
 *.tmp
+/dist/

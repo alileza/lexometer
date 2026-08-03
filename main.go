@@ -18,11 +18,20 @@ import (
 //go:embed web/index.html web/dist
 var webFS embed.FS
 
+// version is set at build time via -ldflags "-X main.version=..."; GoReleaser
+// fills it from the git tag.
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", ":4318", "listen address (dashboard)")
 	projects := flag.String("projects", defaultProjectsPath(), "Claude Code projects directory to watch")
 	poll := flag.Duration("poll", 2*time.Second, "how often to re-scan transcripts for new activity")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("tokometer", version)
+		return
+	}
 
 	// Data source: Claude Code's own transcript files. No OTLP, no config — the
 	// .jsonl sessions already carry the real per-request token usage.
@@ -93,7 +102,7 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; os.Exit(0) }()
 
-	fmt.Printf(`lexometer — dashboard on http://localhost%[1]s
+	fmt.Printf(`tokometer — dashboard on http://localhost%[1]s
 
 Reading Claude Code sessions from %[2]s
 No setup, no telemetry exporter — metrics come straight from the transcript files.

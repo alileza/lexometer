@@ -1,4 +1,4 @@
-// lexometer dashboard — Grafana-style panels rendered with uPlot (the same
+// tokometer dashboard — Grafana-style panels rendered with uPlot (the same
 // charting library Grafana's Time series panel uses).
 
 import uPlot from 'uplot';
@@ -256,7 +256,7 @@ async function refreshEvents() {
   } catch { /* server away */ }
 }
 
-// Data source panel: there's nothing to configure — lexometer reads Claude Code's
+// Data source panel: there's nothing to configure — tokometer reads Claude Code's
 // transcript files directly — so this just reports what it's reading.
 function renderSetup() {
   const root = document.getElementById('setup-root');
@@ -490,9 +490,9 @@ function render(s: Summary) {
 
   if (rows.length === 0) {
     app.innerHTML = `<div id="empty"><strong>No Claude Code sessions found.</strong>
-      lexometer reads your transcript files from <code>~/.claude/projects</code> — nothing to configure.
+      tokometer reads your transcript files from <code>~/.claude/projects</code> — nothing to configure.
       Start (or resume) a Claude Code session and its usage will appear here within a couple of seconds.
-      <pre>lexometer --projects ~/.claude/projects   # the default; override only if yours lives elsewhere</pre></div>`;
+      <pre>tokometer --projects ~/.claude/projects   # the default; override only if yours lives elsewhere</pre></div>`;
     return;
   }
 
@@ -701,7 +701,7 @@ async function tick() {
     render(await res.json() as Summary);
   } catch {
     statusEl.className = '';
-    statusText.textContent = 'lexometer unreachable';
+    statusText.textContent = 'tokometer unreachable';
   }
 }
 

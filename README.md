@@ -1,4 +1,4 @@
-# lexometer
+# tokometer
 
 A single binary that shows you where your Claude Code tokens go. It reads Claude
 Code's own session transcripts directly — no telemetry exporter, no env vars, no
@@ -6,17 +6,37 @@ Prometheus, no Grafana, no Docker, no collector. One process, one port, one
 dashboard.
 
 ```
-~/.claude/projects/*.jsonl ──watch──▶ lexometer ──▶ http://localhost:4318
+~/.claude/projects/*.jsonl ──watch──▶ tokometer ──▶ http://localhost:4318
 ```
 
 ## Install
 
+**One-line install** (macOS / Linux, prebuilt binary — no Go needed):
+
 ```bash
-go install github.com/alileza/lexometer@latest
-lexometer
+curl -fsSL https://tokometer.apps.alileza.me/install.sh | sh
 ```
 
-That's the whole setup. Open **http://localhost:4318**. lexometer reads your
+**Homebrew** (macOS / Linux):
+
+```bash
+brew install alileza/tap/tokometer
+```
+
+**With Go:**
+
+```bash
+go install github.com/alileza/tokometer@latest
+```
+
+Or grab a binary for your platform from the
+[Releases page](https://github.com/alileza/tokometer/releases). Then just run:
+
+```bash
+tokometer
+```
+
+That's the whole setup. Open **http://localhost:4318**. tokometer reads your
 existing transcripts, so your full history is there immediately — total tokens by
 type (cacheRead / cacheCreation / output / input), tokens per hour, sessions,
 active time, a per-prompt cost breakdown (with the real prompt text), and which
@@ -60,12 +80,33 @@ and tool content — and reading them means:
   Time series panel uses — bundled and embedded in the binary. `make build`
   rebuilds both.
 
+## Releasing (maintainers)
+
+Releases are cut by pushing a semver tag; a GitHub Actions workflow runs
+[GoReleaser](https://goreleaser.com), which cross-compiles every platform, uploads
+the archives + `checksums.txt` to the GitHub Release, and updates the Homebrew tap.
+
+```bash
+make build && git add -A && git commit -m "…"   # refresh the embedded dashboard first
+git tag v0.1.0
+git push origin main --tags
+```
+
+One-time setup for the Homebrew formula:
+
+1. Create an empty repo `alileza/homebrew-tap`.
+2. Create a fine-grained PAT with **contents: read & write** on that repo.
+3. Add it to this repo's Actions secrets as `HOMEBREW_TAP_TOKEN`.
+
+(Skip all three and delete the `brews:` block in `.goreleaser.yaml` to publish
+binaries only.)
+
 ## Why not Prometheus + Grafana?
 
 [claude-otlp-example](https://github.com/alileza/claude-otlp-example) does a
 related job with the full OTLP stack — collector, Prometheus, Grafana, three
 containers, and the same exporter env vars. It works, but it's a lot of machinery,
-and it only sees usage from the moment you wire it up. lexometer needs none of
+and it only sees usage from the moment you wire it up. tokometer needs none of
 that and reads what Claude Code already wrote.
 
 ## License

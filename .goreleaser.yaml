@@ -1,0 +1,67 @@
+# GoReleaser v2 — cross-compiles tokometer and publishes prebuilt binaries to
+# GitHub Releases (plus a Homebrew formula) on every semver tag (vX.Y.Z).
+# The web dashboard is embedded from the committed web/dist, so no Node is needed
+# at release time — run `make build` and commit before tagging to refresh it.
+version: 2
+
+project_name: tokometer
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tokometer
+    binary: tokometer
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: alileza
+    name: tokometer
+
+# Publishes a formula to github.com/alileza/homebrew-tap so users can
+# `brew install alileza/tap/tokometer`. Requires a HOMEBREW_TAP_TOKEN secret
+# (a PAT with contents:write on the tap repo) — cross-repo pushes can't use the
+# default GITHUB_TOKEN.
+brews:
+  - name: tokometer
+    repository:
+      owner: alileza
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/alileza/tokometer"
+    description: "See where your Claude Code tokens go, read straight from the session transcripts"
+    license: MIT
+    install: |
+      bin.install "tokometer"
+    test: |
+      system "#{bin}/tokometer", "--version"

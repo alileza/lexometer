@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The transcript watcher is lexometer's data source: it reads Claude Code's own
+// The transcript watcher is tokometer's data source: it reads Claude Code's own
 // session files (~/.claude/projects/*/*.jsonl) and derives every metric the
 // dashboard shows. No OTLP, no env setup — the files already contain the real
 // per-request token accounting (message.usage), the model, timestamps, and the

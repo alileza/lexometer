@@ -1,5 +1,5 @@
 {
-  "name": "lexometer",
+  "name": "tokometer",
   "version": "1.0.0",
   "description": "A single binary that shows where your Claude Code tokens go, read straight from the session transcripts — no telemetry exporter, no Prometheus, no Grafana, no Docker, no collector. One process, one port, one dashboard.",
   "main": "index.js",
@@ -8,16 +8,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alileza/lexometer.git"
+    "url": "git+https://github.com/alileza/tokometer.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/alileza/lexometer/issues"
+    "url": "https://github.com/alileza/tokometer/issues"
   },
-  "homepage": "https://github.com/alileza/lexometer#readme",
+  "homepage": "https://github.com/alileza/tokometer#readme",
   "dependencies": {
     "uplot": "^1.6.32"
   },
