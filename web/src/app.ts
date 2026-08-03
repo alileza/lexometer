@@ -5,7 +5,7 @@ import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 
 interface Row { t: number; metric: string; labels: Record<string, string>; value: number }
-interface Summary { rows: Row[]; metrics: string[]; lastReceived: number; now: number }
+interface Summary { rows: Row[]; metrics: string[]; lastReceived: number; logsLastReceived: number; now: number }
 
 // Grafana classic palette, fixed assignment per token type
 const GREEN = '#73BF69', BLUE = '#5794F2', YELLOW = '#FADE2A', ORANGE = '#FF9830',
@@ -23,7 +23,6 @@ const app = document.getElementById('app')!;
 const tip = document.getElementById('tip')!;
 const statusEl = document.getElementById('status')!;
 const statusText = document.getElementById('status-text')!;
-const rangesEl = document.getElementById('ranges')!;
 
 const fmtUSD = (v: number | null) => v == null ? '–' : '$' + (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
 const fmtTok = (v: number | null) =>
@@ -36,21 +35,6 @@ const fmtDur = (sec: number) => {
   const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
-
-// ---- time range picker (Grafana-style presets) ----
-const RANGES: [string, number][] = [['24h', 24 * HOUR], ['7d', 7 * 86400], ['30d', 30 * 86400], ['All', 0]];
-let activeRange = '7d';
-for (const [name] of RANGES) {
-  const b = document.createElement('button');
-  b.textContent = name;
-  b.className = name === activeRange ? 'active' : '';
-  b.onclick = () => {
-    activeRange = name;
-    rangesEl.querySelectorAll('button').forEach(x => x.className = x.textContent === name ? 'active' : '');
-    if (lastSummary) render(lastSummary);
-  };
-  rangesEl.appendChild(b);
-}
 
 function sum(rows: Row[], pred: (r: Row) => boolean): number {
   let s = 0;
@@ -236,7 +220,59 @@ async function refreshEvents() {
     const r = await fetch('/api/events');
     eventsCache = (await r.json() as Ev[] | null) ?? [];
     renderEvents();
+    renderSetup();
   } catch { /* server away */ }
+}
+
+// Setup checklist: lexometer can't see Claude Code's environment, so each item
+// is verified by whether its data actually arrives — ground truth, not claims.
+function renderSetup() {
+  const root = document.getElementById('setup-root');
+  const s = lastSummary;
+  if (!root || !s) return;
+
+  const fresh = (ts: number) => ts > 0;
+  const ago = (ts: number) => ts > 0 ? `last data ${Math.max(0, s.now - ts)}s ago` : '';
+  const hasSkillsFlag = (s.rows ?? []).some(r => r.labels['skills_enabled']);
+  const skillsVals = [...new Set((s.rows ?? []).map(r => r.labels['skills_enabled']).filter(Boolean))].join(', ');
+  const hasPromptText = eventsCache.some(e => e.name.includes('user_prompt') && (e.attrs['prompt'] ?? '') !== '');
+
+  interface Check { ok: boolean; label: string; detail: string; fix: string; optional?: boolean }
+  const checks: Check[] = [
+    {
+      ok: fresh(s.lastReceived), label: 'Metrics stream',
+      detail: fresh(s.lastReceived) ? ago(s.lastReceived) : 'no metrics ever received',
+      fix: 'export CLAUDE_CODE_ENABLE_TELEMETRY=1\nexport OTEL_METRICS_EXPORTER=otlp\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/json\nexport OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318',
+    },
+    {
+      ok: fresh(s.logsLastReceived), label: 'Events stream (per-prompt views)',
+      detail: fresh(s.logsLastReceived) ? ago(s.logsLastReceived) : 'no log events received — the Prompts and context-buildup panels need this',
+      fix: 'export OTEL_LOGS_EXPORTER=otlp',
+    },
+    {
+      ok: hasSkillsFlag, label: 'Experiment flag (before/after)',
+      detail: hasSkillsFlag ? `skills_enabled seen: ${skillsVals}` : 'no skills_enabled label on any data — the before/after panel needs it',
+      fix: 'export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"   # flip to true when you enable an intervention',
+    },
+    {
+      ok: hasPromptText, label: 'Prompt text (optional)', optional: true,
+      detail: hasPromptText ? 'prompt text included in events' : 'prompts show as length only — opt in to log the text itself',
+      fix: 'export OTEL_LOG_USER_PROMPTS=1',
+    },
+  ];
+
+  const missing = checks.filter(c => !c.ok && !c.optional).length;
+  const rowsHTML = checks.map(c => `
+    <div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(204,204,220,0.05)">
+      <span style="flex:none;width:16px;color:${c.ok ? '#73BF69' : c.optional ? 'rgba(204,204,220,0.4)' : '#F2495C'}">${c.ok ? '✓' : c.optional ? '○' : '✗'}</span>
+      <span style="flex:none;min-width:220px">${c.label}</span>
+      <span style="flex:1;color:rgba(204,204,220,0.5);font-size:12px">${c.detail}</span>
+    </div>
+    ${c.ok ? '' : `<pre style="margin:4px 0 8px 26px;font-family:var(--mono);font-size:11.5px;background:#0b0c0e;border:1px solid #23262b;border-radius:4px;padding:8px 10px;overflow-x:auto;color:#FADE2A">${c.fix}</pre>`}`).join('');
+
+  root.innerHTML = `<div class="panel" style="margin-bottom:8px"><div class="panel-title">Telemetry setup
+    <span class="desc">${missing === 0 ? 'everything wired — detected from live data, not from claimed config' : `${missing} piece${missing > 1 ? 's' : ''} missing — add to your shell profile, then start a new Claude Code session`}</span></div>
+    <div class="panel-body" style="font-size:13px">${rowsHTML}</div></div>`;
 }
 
 function renderEvents() {
@@ -373,12 +409,9 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   const models = [...new Set(rows.filter(isCost).map(model))].sort();
   const modelColor = new Map(models.map((m, i) => [m, MODEL_PALETTE[i % MODEL_PALETTE.length]!]));
 
-  // time window from range preset
-  const rangeSec = RANGES.find(r => r[0] === activeRange)![1];
   const tMax = Math.ceil(s.now / HOUR) * HOUR;
-  const tMinData = Math.min(...rows.map(r => r.t));
-  const tMin = rangeSec === 0 ? tMinData : Math.max(tMinData, tMax - rangeSec);
-  const inRange = rows.filter(r => r.t >= tMin);
+  const tMin = Math.min(...rows.map(r => r.t));
+  const inRange = rows;
 
   app.innerHTML = `<div class="row stats">`
     + statPanel(fmtUSD(sum(rows, isCost)), 'total cost recorded', 'green')
@@ -386,9 +419,10 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     + statPanel(fmtTok(sum(rows, isTok)), 'total tokens')
     + statPanel(String(Math.round(sum(rows, isSession))), 'sessions')
     + statPanel(fmtDur(sum(rows, r => isActive(r) && day(r.t) === today)), 'active time today')
-    + `</div>`;
+    + `</div><div id="setup-root"></div>`;
+  renderSetup();
 
-  chartPanel(app, 'Cost', `USD per hour · ${activeRange}`,
+  chartPanel(app, 'Cost', 'USD per hour',
     hourly(inRange, tMin, tMax, [isCost]),
     [{ label: 'cost', color: GREEN, fill: true }], fmtUSD);
 
@@ -409,20 +443,20 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     TOKEN_TYPES.map(([n, c]) => [n, sum(rows, r => isTok(r) && r.labels['type'] === n), c]), fmtTok);
 
   if (models.length > 0) {
-    chartPanel(app, 'Cost by model', `USD per hour per model · ${activeRange}`,
+    chartPanel(app, 'Cost by model', 'USD per hour per model',
       hourly(inRange, tMin, tMax, models.map(m => (r: Row) => isCost(r) && model(r) === m)),
       models.map(m => ({ label: m, color: modelColor.get(m)!, fill: true })), fmtUSD, 180);
   }
 
-  chartPanel(app, 'Token usage', `tokens per hour by type · ${activeRange}`,
+  chartPanel(app, 'Token usage', 'tokens per hour by type',
     hourly(inRange, tMin, tMax, TOKEN_TYPES.map(([n]) => (r: Row) => isTok(r) && r.labels['type'] === n)),
     TOKEN_TYPES.map(([n, c]) => ({ label: n, color: c, fill: true })), fmtTok);
 
-  chartPanel(app, 'Sessions', `sessions started per hour · ${activeRange}`,
+  chartPanel(app, 'Sessions', 'sessions started per hour',
     hourly(inRange, tMin, tMax, [isSession]),
     [{ label: 'sessions', color: BLUE, bars: true }], v => v == null ? '–' : String(Math.round(v)), 140);
 
-  chartPanel(app, 'Active time', `seconds of active Claude Code use per hour · ${activeRange}`,
+  chartPanel(app, 'Active time', 'seconds of active Claude Code use per hour',
     hourly(inRange, tMin, tMax, [isActive]),
     [{ label: 'active', color: PURPLE, fill: true }], v => v == null ? '–' : fmtDur(v), 140);
 

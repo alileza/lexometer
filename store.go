@@ -23,7 +23,8 @@ type Store struct {
 	// hour(unix sec) -> metric -> coarse labels -> summed value
 	Buckets map[int64]map[string]map[string]float64 `json:"buckets"`
 
-	LastReceived int64 `json:"lastReceived"`
+	LastReceived     int64 `json:"lastReceived"`
+	LogsLastReceived int64 `json:"logsLastReceived"`
 
 	// recent telemetry log events (user_prompt, api_request, …), oldest first
 	EventLog []Event `json:"events"`
@@ -143,10 +144,11 @@ type Row struct {
 }
 
 type Summary struct {
-	Rows         []Row   `json:"rows"`
-	Metrics      []string `json:"metrics"`
-	LastReceived int64   `json:"lastReceived"`
-	Now          int64   `json:"now"`
+	Rows             []Row    `json:"rows"`
+	Metrics          []string `json:"metrics"`
+	LastReceived     int64    `json:"lastReceived"`
+	LogsLastReceived int64    `json:"logsLastReceived"`
+	Now              int64    `json:"now"`
 }
 
 func parseCoarse(key string) map[string]string {
@@ -166,7 +168,8 @@ func (s *Store) Summary() Summary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	out := Summary{Rows: []Row{}, Metrics: []string{}, LastReceived: s.LastReceived, Now: time.Now().Unix()}
+	out := Summary{Rows: []Row{}, Metrics: []string{}, LastReceived: s.LastReceived,
+		LogsLastReceived: s.LogsLastReceived, Now: time.Now().Unix()}
 	seen := map[string]bool{}
 	for hour, metrics := range s.Buckets {
 		for metric, coarse := range metrics {
@@ -401,6 +404,7 @@ func (s *Store) IngestLogs(body []byte) error {
 		s.EventLog = s.EventLog[len(s.EventLog)-maxEvents:]
 	}
 	if len(ex.ResourceLogs) > 0 {
+		s.LogsLastReceived = time.Now().Unix()
 		s.dirty = true
 	}
 	return nil

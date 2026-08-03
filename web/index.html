@@ -31,15 +31,7 @@
   .mark { width: 24px; height: 24px; border-radius: 4px; background: linear-gradient(135deg, #F2CC0C, #FF9830);
     display: grid; place-items: center; color: #111; font-weight: 800; font-size: 13px; }
   .name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
-  #ranges { margin-left: auto; display: flex; gap: 0; border: 1px solid var(--panel-border); border-radius: 2px; overflow: hidden; flex: none; }
-  #ranges button {
-    background: var(--panel); color: var(--text-dim); border: none; border-right: 1px solid var(--panel-border);
-    padding: 5px 12px; font-size: 12px; font-family: var(--font); cursor: pointer;
-  }
-  #ranges button:last-child { border-right: none; }
-  #ranges button:hover { color: var(--text); background: #22252b; }
-  #ranges button.active { background: #3d71d9; color: #fff; }
-  #status { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; margin-left: 14px; flex: none; white-space: nowrap; }
+  #status { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; white-space: nowrap; }
   #status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
   #status.live .dot { background: var(--green); box-shadow: 0 0 0 3px rgba(115,191,105,0.2); }
 
@@ -115,7 +107,6 @@
 <body>
 <header>
   <span class="mark">L</span><span class="name">lexometer</span>
-  <div id="ranges"></div>
   <span id="status"><span class="dot"></span><span id="status-text">waiting for telemetry…</span></span>
 </header>
 <main><div id="live"></div><div id="app"></div></main>
