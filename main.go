@@ -74,6 +74,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(store.Events())
 	})
+	attr := newAttrCache()
+	mux.HandleFunc("GET /api/attribution", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(attr.Compute(20))
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
 	mux.HandleFunc("GET /dist/", func(w http.ResponseWriter, r *http.Request) {

@@ -332,9 +332,11 @@ function renderEvents() {
     [{ label: 'context tokens', color: ORANGE, fill: true }], fmtTok, 180));
 
   // group api_requests + tool events under the user_prompt that caused them, per session
+  interface Req { cr: number; cc: number; inp: number; out: number; tools: string[] }
   interface Group {
     t: number; text: string; len: number; calls: number; durMs: number;
     cr: number; cc: number; inp: number; out: number; tools: Map<string, number>;
+    reqs: Req[]; pendingTools: string[];
   }
   const groups: Group[] = [];
   const current = new Map<string, Group>();
@@ -343,6 +345,7 @@ function renderEvents() {
       const g: Group = {
         t: e.t, text: promptText(e.attrs), len: num(e.attrs, 'prompt_length'),
         calls: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
+        reqs: [], pendingTools: [],
       };
       groups.push(g);
       current.set(e.session, g);
@@ -351,14 +354,17 @@ function renderEvents() {
       if (!g) continue;
       if (e.name.includes('api_request')) {
         g.calls++;
-        g.cr += num(e.attrs, 'cache_read_tokens');
-        g.cc += num(e.attrs, 'cache_creation_tokens');
-        g.inp += num(e.attrs, 'input_tokens');
-        g.out += num(e.attrs, 'output_tokens');
+        const cr = num(e.attrs, 'cache_read_tokens'), cc = num(e.attrs, 'cache_creation_tokens');
+        const inp = num(e.attrs, 'input_tokens'), out = num(e.attrs, 'output_tokens');
+        g.cr += cr; g.cc += cc; g.inp += inp; g.out += out;
         g.durMs += num(e.attrs, 'duration_ms');
+        // tools observed since the previous request produced this call's new context
+        g.reqs.push({ cr, cc, inp, out, tools: g.pendingTools });
+        g.pendingTools = [];
       } else if (e.name.includes('tool_result') || e.name.includes('tool_decision')) {
         const tn = e.attrs['tool_name'] ?? e.attrs['name'] ?? 'tool';
         g.tools.set(tn, (g.tools.get(tn) ?? 0) + 1);
+        g.pendingTools.push(tn);
       }
     }
   }
@@ -390,19 +396,48 @@ function renderEvents() {
     table.className = 'panel';
     const legend = TOKEN_TYPES.map(([n, c]) =>
       `<span class="key" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px"><span style="width:11px;height:4px;border-radius:1px;background:${c};display:inline-block"></span>${n}</span>`).join('');
-    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">where each prompt's tokens went — cacheRead is context re-sent from earlier turns (hover the bar for the split)</span></div>
+    // detail: one line per API call — cacheRead is the re-sent context, cacheCreation
+    // is the new content that call added, with the tools that produced it.
+    const detailRow = (g: Group): string => {
+      const rows = g.reqs.map((rq, i) => {
+        const tot = rq.cr + rq.cc + rq.inp + rq.out;
+        const tls = rq.tools.length ? rq.tools.join(', ') : '—';
+        return `<tr style="background:rgba(204,204,220,0.02)">
+          <td style="padding-left:24px;color:var(--text-faint)">call ${i + 1}</td>
+          <td colspan="2" style="color:var(--text-dim)">after: ${esc(tls)}</td>
+          <td class="num" title="total">${fmtTok(tot)}</td>
+          <td class="num" style="color:${BLUE}">cR ${fmtTok(rq.cr)}</td>
+          <td class="num" style="color:${GREEN}">cC ${fmtTok(rq.cc)}</td>
+          <td class="num" style="color:${YELLOW}">out ${fmtTok(rq.out)}</td>
+        </tr>`;
+      }).join('');
+      return `<tr class="detail" style="display:none"><td colspan="7" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
+    };
+    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">where each prompt's tokens went — click a row to see the per-call breakdown (cacheRead = re-sent context, cacheCreation = new content that call added)</span></div>
       <div class="panel-body"><div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div><table>
-      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th style="min-width:120px">Distribution</th><th>Tools</th><th class="num">Duration</th></tr>
-      ${latest.map(g => `<tr>
-        <td>${hhmmss(g.t)}</td>
+      <tr><th></th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th style="min-width:120px">Distribution</th><th>Tools</th><th class="num">Duration</th></tr>
+      ${latest.map(g => `<tr class="prow" style="cursor:pointer">
+        <td style="white-space:nowrap"><span class="caret" style="color:var(--text-faint)">▸</span> ${hhmmss(g.t)}</td>
         <td>${g.text ? esc(g.text.slice(0, 60)) + (g.text.length > 60 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
         <td class="num">${g.calls}</td>
         <td class="num">${fmtTok(g.cr + g.cc + g.inp + g.out)}</td>
         <td>${distBar(g)}</td>
         <td>${toolsCell(g)}</td>
         <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
-      </tr>`).join('')}
+      </tr>${detailRow(g)}`).join('')}
       </table></div>`;
+    // toggle detail rows
+    table.querySelectorAll('tr.prow').forEach(row => {
+      row.addEventListener('click', () => {
+        const detail = row.nextElementSibling as HTMLElement | null;
+        const caret = row.querySelector('.caret') as HTMLElement | null;
+        if (detail && detail.classList.contains('detail')) {
+          const open = detail.style.display !== 'none';
+          detail.style.display = open ? 'none' : '';
+          if (caret) caret.textContent = open ? '▸' : '▾';
+        }
+      });
+    });
     root.appendChild(table);
   }
 }
@@ -583,6 +618,40 @@ function feedLive(totalTokens: number, tSec: number) {
   livePrev = { t: tSec, tokens: totalTokens };
 }
 
+// ---- context attribution (from transcript files, not live telemetry) ----
+interface AttrItem { key: string; tokens: number; count: number }
+interface AttrData { files: AttrItem[]; tools: AttrItem[]; scanned: number; note: string }
+
+async function loadAttribution() {
+  const root = document.getElementById('attr')!;
+  root.innerHTML = `<div class="panel"><div class="panel-title">Context attribution
+    <span class="desc">scanning transcript files…</span></div></div>`;
+  try {
+    const a = await (await fetch('/api/attribution')).json() as AttrData;
+    const maxF = Math.max(1, ...a.files.map(f => f.tokens));
+    const maxT = Math.max(1, ...a.tools.map(t => t.tokens));
+    const bar = (v: number, max: number, c: string) =>
+      `<div style="height:5px;border-radius:2px;background:${c};width:${Math.max(2, v / max * 100)}%"></div>`;
+    const fileRows = a.files.map(f => `<tr>
+      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(f.key)}">${esc(f.key)}</td>
+      <td class="num">${fmtTok(f.tokens)}</td><td class="num">${f.count}×</td>
+      <td style="width:130px">${bar(f.tokens, maxF, BLUE)}</td></tr>`).join('');
+    const toolRows = a.tools.map(t => `<tr>
+      <td>${esc(t.key)}</td><td class="num">${fmtTok(t.tokens)}</td><td class="num">${t.count}×</td>
+      <td style="width:130px">${bar(t.tokens, maxT, GREEN)}</td></tr>`).join('');
+    root.innerHTML = `<div class="row half">
+      <div class="panel"><div class="panel-title">Top files by context <span class="desc">estimated tokens across ${a.scanned} transcripts — reads that fill the window</span></div>
+        <div class="panel-body"><table><tr><th>File</th><th class="num">~Tokens</th><th class="num">Reads</th><th></th></tr>${fileRows}</table></div></div>
+      <div class="panel"><div class="panel-title">By tool <span class="desc">estimated tokens produced per tool</span></div>
+        <div class="panel-body"><table><tr><th>Tool</th><th class="num">~Tokens</th><th class="num">Calls</th><th></th></tr>${toolRows}</table></div></div>
+      </div>
+      <div style="font-size:11.5px;color:var(--text-faint);margin:-2px 2px 8px">${esc(a.note)} · <a href="#" id="attr-refresh" style="color:var(--blue)">refresh</a></div>`;
+    document.getElementById('attr-refresh')?.addEventListener('click', (e) => { e.preventDefault(); loadAttribution(); });
+  } catch {
+    root.innerHTML = `<div class="panel"><div class="panel-title">Context attribution <span class="desc">could not read transcripts</span></div></div>`;
+  }
+}
+
 async function tick() {
   try {
     const res = await fetch('/api/summary');
@@ -613,5 +682,6 @@ function connect() {
 tick();
 connect();
 initLive();
+loadAttribution();
 setInterval(() => { if (!wsOpen) tick(); }, 10_000);
 setInterval(() => { if (wsOpen) tick(); }, 30_000); // refresh relative timestamps
