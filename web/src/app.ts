@@ -264,42 +264,74 @@ function renderEvents() {
     [recent.map(e => e.t / 1000), recent.map(e => ctxOf(e.attrs))] as uPlot.AlignedData,
     [{ label: 'context tokens', color: ORANGE, fill: true }], fmtTok, 180));
 
-  // group api_requests under the user_prompt that caused them, per session
-  interface Group { t: number; text: string; len: number; calls: number; ctxMax: number; out: number; cost: number; durMs: number }
+  // group api_requests + tool events under the user_prompt that caused them, per session
+  interface Group {
+    t: number; text: string; len: number; calls: number; cost: number; durMs: number;
+    cr: number; cc: number; inp: number; out: number; tools: Map<string, number>;
+  }
   const groups: Group[] = [];
   const current = new Map<string, Group>();
   for (const e of evs) {
     if (e.name.includes('user_prompt')) {
       const g: Group = {
         t: e.t, text: e.attrs['prompt'] ?? '', len: num(e.attrs, 'prompt_length'),
-        calls: 0, ctxMax: 0, out: 0, cost: 0, durMs: 0,
+        calls: 0, cost: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
       };
       groups.push(g);
       current.set(e.session, g);
-    } else if (e.name.includes('api_request')) {
+    } else {
       const g = current.get(e.session);
       if (!g) continue;
-      g.calls++;
-      g.ctxMax = Math.max(g.ctxMax, ctxOf(e.attrs));
-      g.out += num(e.attrs, 'output_tokens');
-      g.cost += num(e.attrs, 'cost_usd', 'cost');
-      g.durMs += num(e.attrs, 'duration_ms');
+      if (e.name.includes('api_request')) {
+        g.calls++;
+        g.cr += num(e.attrs, 'cache_read_tokens');
+        g.cc += num(e.attrs, 'cache_creation_tokens');
+        g.inp += num(e.attrs, 'input_tokens');
+        g.out += num(e.attrs, 'output_tokens');
+        g.cost += num(e.attrs, 'cost_usd', 'cost');
+        g.durMs += num(e.attrs, 'duration_ms');
+      } else if (e.name.includes('tool_result') || e.name.includes('tool_decision')) {
+        const tn = e.attrs['tool_name'] ?? e.attrs['name'] ?? 'tool';
+        g.tools.set(tn, (g.tools.get(tn) ?? 0) + 1);
+      }
     }
   }
+
+  // stacked mini-bar: how one prompt's tokens split across the four types
+  const distBar = (g: Group): string => {
+    const parts: [string, number, string][] = [
+      ['cacheRead', g.cr, BLUE], ['cacheCreation', g.cc, GREEN],
+      ['output', g.out, YELLOW], ['input', g.inp, ORANGE],
+    ];
+    const total = g.cr + g.cc + g.out + g.inp;
+    if (total <= 0) return '';
+    const title = parts.map(([n, v]) => `${n}: ${fmtTok(v)} (${(v / total * 100).toFixed(1)}%)`).join('\n');
+    const segs = parts.filter(([, v]) => v > 0).map(([, v, c]) =>
+      `<div style="flex:${(v / total * 1000).toFixed(0)};background:${c}"></div>`).join('');
+    return `<div class="dist" title="${esc(title)}">${segs}</div>`;
+  };
+  const toolsCell = (g: Group): string => {
+    if (g.tools.size === 0) return '<span style="color:rgba(204,204,220,0.35)">–</span>';
+    const items = [...g.tools.entries()].sort((a, b) => b[1] - a[1]);
+    const shown = items.slice(0, 3).map(([n, c]) => c > 1 ? `${esc(n)}×${c}` : esc(n)).join(', ');
+    const more = items.length > 3 ? ` +${items.length - 3}` : '';
+    return `<span title="${esc(items.map(([n, c]) => `${n}×${c}`).join(', '))}">${shown}${more}</span>`;
+  };
 
   const latest = groups.slice(-25).reverse();
   if (latest.length > 0) {
     const table = document.createElement('div');
     table.className = 'panel';
-    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">what each prompt actually cost — context re-sent, output produced, latency</span></div>
+    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">what each prompt actually cost, and where its tokens went (hover the bar for the split)</span></div>
       <div class="panel-body"><table>
-      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Context sent</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Duration</th></tr>
+      <tr><th>Time</th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th>Distribution</th><th>Tools</th><th class="num">Cost</th><th class="num">Duration</th></tr>
       ${latest.map(g => `<tr>
         <td>${hhmmss(g.t)}</td>
-        <td>${g.text ? esc(g.text.slice(0, 70)) + (g.text.length > 70 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
+        <td>${g.text ? esc(g.text.slice(0, 60)) + (g.text.length > 60 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
         <td class="num">${g.calls}</td>
-        <td class="num">${fmtTok(g.ctxMax)}</td>
-        <td class="num">${fmtTok(g.out)}</td>
+        <td class="num">${fmtTok(g.cr + g.cc + g.inp + g.out)}</td>
+        <td>${distBar(g)}</td>
+        <td>${toolsCell(g)}</td>
         <td class="num">${g.cost >= 0.005 ? fmtUSD(g.cost) : '$' + g.cost.toFixed(3)}</td>
         <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
       </tr>`).join('')}
