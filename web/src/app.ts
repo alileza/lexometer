@@ -111,6 +111,33 @@ interface SeriesDef { label: string; color: string; fill?: boolean; bars?: boole
 
 let plots: uPlot[] = [];
 
+// uPlot must be sized to the panel body's *content* width — body.clientWidth
+// includes the 12px horizontal padding, so using it directly overflows the
+// canvas past the panel's right edge (the asymmetry). Subtract the padding.
+function contentWidth(body: HTMLElement): number {
+  const cs = getComputedStyle(body);
+  const pad = parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+  return Math.max(280, Math.floor((body.clientWidth || 1120) - pad));
+}
+// Keep every chart sized to its container as the layout changes (sidebar,
+// scrollbar appearing, window resize). One observer, all live charts.
+const sizeObserver = new ResizeObserver(entries => {
+  for (const e of entries) {
+    const u = (e.target as HTMLElement & { _u?: uPlot })._u;
+    if (u) u.setSize({ width: contentWidth(e.target as HTMLElement), height: u.height });
+  }
+});
+function autosize(u: uPlot, body: HTMLElement & { _u?: uPlot }) {
+  body._u = u;
+  sizeObserver.observe(body);
+}
+// Unobserve before destroying so the observer doesn't retain dead charts.
+function destroyPlot(u: uPlot) {
+  const body = u.root.closest('.panel-body');
+  if (body) sizeObserver.unobserve(body);
+  u.destroy();
+}
+
 function chartPanel(parent: Element, title: string, desc: string, data: uPlot.AlignedData,
                     defs: SeriesDef[], fmt: (v: number | null) => string, height = 220): uPlot {
   const panel = document.createElement('div');
@@ -133,7 +160,7 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
   ];
 
   const opts: uPlot.Options = {
-    width: Math.max(320, body.clientWidth || 1120),
+    width: contentWidth(body),
     height,
     series,
     legend: { live: false },
@@ -152,6 +179,7 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
 
   const u = new uPlot(opts, data, body);
   plots.push(u);
+  autosize(u, body);
   return u;
 }
 
@@ -212,6 +240,10 @@ const num = (a: Record<string, string>, ...keys: string[]): number => {
   }
   return 0;
 };
+// Claude Code's attribute name for the prompt text isn't guaranteed; try the
+// likely candidates so a version rename doesn't silently blank the column.
+const promptText = (a: Record<string, string>): string =>
+  a['prompt'] ?? a['prompt_text'] ?? a['user_prompt'] ?? a['event.prompt'] ?? '';
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const hhmmss = (ms: number) => new Date(ms).toLocaleTimeString();
 
@@ -235,7 +267,7 @@ function renderSetup() {
   const ago = (ts: number) => ts > 0 ? `last data ${Math.max(0, s.now - ts)}s ago` : '';
   const hasSkillsFlag = (s.rows ?? []).some(r => r.labels['skills_enabled']);
   const skillsVals = [...new Set((s.rows ?? []).map(r => r.labels['skills_enabled']).filter(Boolean))].join(', ');
-  const hasPromptText = eventsCache.some(e => e.name.includes('user_prompt') && (e.attrs['prompt'] ?? '') !== '');
+  const hasPromptText = eventsCache.some(e => e.name.includes('user_prompt') && promptText(e.attrs) !== '');
 
   interface Check { ok: boolean; label: string; detail: string; fix: string; optional?: boolean }
   const checks: Check[] = [
@@ -278,7 +310,7 @@ function renderSetup() {
 function renderEvents() {
   const root = document.getElementById('events-root');
   if (!root) return;
-  for (const p of evPlots) { p.destroy(); plots = plots.filter(x => x !== p); }
+  for (const p of evPlots) { destroyPlot(p); plots = plots.filter(x => x !== p); }
   evPlots = [];
   root.innerHTML = '';
 
@@ -310,7 +342,7 @@ function renderEvents() {
   for (const e of evs) {
     if (e.name.includes('user_prompt')) {
       const g: Group = {
-        t: e.t, text: e.attrs['prompt'] ?? '', len: num(e.attrs, 'prompt_length'),
+        t: e.t, text: promptText(e.attrs), len: num(e.attrs, 'prompt_length'),
         calls: 0, cost: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
       };
       groups.push(g);
@@ -384,7 +416,7 @@ function render(s: Summary) {
   statusText.textContent = s.lastReceived === 0 ? 'waiting for telemetry…'
     : `last data ${Math.max(0, s.now - s.lastReceived)}s ago`;
 
-  for (const p of plots) p.destroy();
+  for (const p of plots) destroyPlot(p);
   plots = [];
   tip.style.display = 'none';
 
@@ -491,13 +523,6 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   app.appendChild(table);
 }
 
-window.addEventListener('resize', () => {
-  for (const p of plots) {
-    const body = p.root.closest('.panel')?.querySelector('.panel-body') as HTMLElement | null;
-    if (body) p.setSize({ width: Math.max(320, body.clientWidth), height: p.height });
-  }
-});
-
 // ---- realtime panel: 1s sampling of /api/live, rolling 10-minute window ----
 // (same pattern as a live admin panel: poll fast, keep client-side history,
 // plot the per-second delta as a rate — no zoom, it just scrolls)
@@ -514,7 +539,7 @@ function initLive() {
 
   const xs: number[] = [], ys: (number | null)[] = [];
   const u = new uPlot({
-    width: Math.max(320, body.clientWidth || 1120),
+    width: contentWidth(body),
     height: 110,
     series: [
       {},
@@ -530,6 +555,7 @@ function initLive() {
     plugins: [tooltipPlugin(v => v == null ? '–' : fmtTok(v) + '/s')],
   }, [xs, ys] as uPlot.AlignedData, body);
   plotsLive = u;
+  autosize(u, body);
 
   let prev: { t: number; tokens: number } | null = null;
   const sample = async () => {
