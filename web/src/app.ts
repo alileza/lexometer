@@ -231,6 +231,7 @@ let lastSummary: Summary | null = null;
 interface Ev { t: number; session: string; name: string; attrs: Record<string, string> }
 let eventsCache: Ev[] = [];
 let evPlots: uPlot[] = [];
+let promptSort: 'cost' | 'recent' = 'cost';
 
 const num = (a: Record<string, string>, ...keys: string[]): number => {
   for (const k of keys) {
@@ -390,56 +391,117 @@ function renderEvents() {
     return `<span title="${esc(items.map(([n, c]) => `${n}×${c}`).join(', '))}">${shown}${more}</span>`;
   };
 
-  const latest = groups.slice(-25).reverse();
-  if (latest.length > 0) {
-    const table = document.createElement('div');
-    table.className = 'panel';
-    const legend = TOKEN_TYPES.map(([n, c]) =>
-      `<span class="key" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px"><span style="width:11px;height:4px;border-radius:1px;background:${c};display:inline-block"></span>${n}</span>`).join('');
-    // detail: one line per API call — cacheRead is the re-sent context, cacheCreation
-    // is the new content that call added, with the tools that produced it.
-    const detailRow = (g: Group): string => {
-      const rows = g.reqs.map((rq, i) => {
-        const tot = rq.cr + rq.cc + rq.inp + rq.out;
-        const tls = rq.tools.length ? rq.tools.join(', ') : '—';
-        return `<tr style="background:rgba(204,204,220,0.02)">
-          <td style="padding-left:24px;color:var(--text-faint)">call ${i + 1}</td>
-          <td colspan="2" style="color:var(--text-dim)">after: ${esc(tls)}</td>
-          <td class="num" title="total">${fmtTok(tot)}</td>
-          <td class="num" style="color:${BLUE}">cR ${fmtTok(rq.cr)}</td>
-          <td class="num" style="color:${GREEN}">cC ${fmtTok(rq.cc)}</td>
-          <td class="num" style="color:${YELLOW}">out ${fmtTok(rq.out)}</td>
-        </tr>`;
-      }).join('');
-      return `<tr class="detail" style="display:none"><td colspan="7" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
-    };
-    table.innerHTML = `<div class="panel-title">Prompts <span class="desc">where each prompt's tokens went — click a row to see the per-call breakdown (cacheRead = re-sent context, cacheCreation = new content that call added)</span></div>
-      <div class="panel-body"><div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div><table>
-      <tr><th></th><th>Prompt</th><th class="num">API calls</th><th class="num">Tokens</th><th style="min-width:120px">Distribution</th><th>Tools</th><th class="num">Duration</th></tr>
-      ${latest.map(g => `<tr class="prow" style="cursor:pointer">
-        <td style="white-space:nowrap"><span class="caret" style="color:var(--text-faint)">▸</span> ${hhmmss(g.t)}</td>
-        <td>${g.text ? esc(g.text.slice(0, 60)) + (g.text.length > 60 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
-        <td class="num">${g.calls}</td>
-        <td class="num">${fmtTok(g.cr + g.cc + g.inp + g.out)}</td>
-        <td>${distBar(g)}</td>
-        <td>${toolsCell(g)}</td>
-        <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
-      </tr>${detailRow(g)}`).join('')}
+  const total = (g: Group) => g.cr + g.cc + g.inp + g.out;
+  if (groups.length === 0) return;
+
+  // per-prompt "why is this expensive" in plain language
+  const reason = (g: Group): { text: string; color: string } => {
+    const tot = total(g) || 1;
+    const crShare = g.cr / tot, ccShare = g.cc / tot, outShare = g.out / tot;
+    if (crShare > 0.85) return { text: 'mostly re-sent context — long session, lots of history carried each turn', color: BLUE };
+    if (ccShare > 0.3) {
+      const tools = [...g.tools.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([n]) => n).join(', ');
+      return { text: `added a lot of new context${tools ? ' via ' + tools : ''} (files/tool output pulled in)`, color: GREEN };
+    }
+    if (outShare > 0.3) return { text: 'long generation — the model wrote a lot back', color: YELLOW };
+    return { text: 're-sent context plus some new content', color: TEXT_DIM };
+  };
+
+  // the teaching signal: is spend concentrated in a few prompts? does it grow?
+  const totals = groups.map(total);
+  const grandTotal = totals.reduce((a, b) => a + b, 0) || 1;
+  const maxTot = Math.max(...totals);
+  const sortedDesc = [...groups].sort((a, b) => total(b) - total(a));
+  const top = sortedDesc[0]!;
+  const topShare = total(top) / grandTotal * 100;
+  const nowSec = lastSummary?.now ?? Math.floor(Date.now() / 1000);
+  const latestG = groups[groups.length - 1]!;
+  const isLive = nowSec - Math.floor(latestG.t / 1000) < 120;
+
+  const ordered = promptSort === 'cost' ? sortedDesc.slice(0, 30) : groups.slice(-30).reverse();
+  const rankOf = new Map(sortedDesc.map((g, i) => [g, i + 1]));
+
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const legend = TOKEN_TYPES.map(([n, c]) =>
+    `<span class="key" style="display:inline-flex;align-items:center;gap:5px;margin-right:12px"><span style="width:11px;height:4px;border-radius:1px;background:${c};display:inline-block"></span>${n}</span>`).join('');
+
+  // headline lesson: name the single most expensive prompt and why
+  const topLabel = top.text ? `“${esc(top.text.slice(0, 54))}${top.text.length > 54 ? '…' : ''}”` : `a ${top.len}-char prompt`;
+  const headline = `<div style="background:rgba(242,73,92,0.08);border:1px solid rgba(242,73,92,0.25);border-radius:3px;padding:10px 12px;margin-bottom:10px;font-size:13px">
+    <span style="color:${RED};font-weight:600">Most expensive prompt:</span> ${topLabel}
+    — <span style="font-family:var(--mono)">${fmtTok(total(top))}</span> tokens (${topShare.toFixed(0)}% of all prompt spend).
+    <span style="color:var(--text-dim)">${reason(top).text}.</span></div>`;
+
+  const detailRow = (g: Group): string => {
+    const rows = g.reqs.map((rq, i) => {
+      const tot = rq.cr + rq.cc + rq.inp + rq.out;
+      const tls = rq.tools.length ? rq.tools.join(', ') : '—';
+      return `<tr style="background:rgba(204,204,220,0.02)">
+        <td style="padding-left:24px;color:var(--text-faint)">call ${i + 1}</td>
+        <td style="color:var(--text-dim)">after: ${esc(tls)}</td>
+        <td class="num" title="total">${fmtTok(tot)}</td>
+        <td class="num" style="color:${BLUE}">cR ${fmtTok(rq.cr)}</td>
+        <td class="num" style="color:${GREEN}">cC ${fmtTok(rq.cc)}</td>
+        <td class="num" style="color:${YELLOW}">out ${fmtTok(rq.out)}</td>
+      </tr>`;
+    }).join('');
+    return `<tr class="detail" style="display:none"><td colspan="6" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
+  };
+
+  const rowHTML = (g: Group): string => {
+    const tot = total(g);
+    const rank = rankOf.get(g)!;
+    const expensive = tot > maxTot * 0.5 && rank <= 3;
+    const rz = reason(g);
+    const live = g === latestG && isLive;
+    const barW = Math.max(2, tot / maxTot * 100);
+    return `<tr class="prow" style="cursor:pointer;${expensive ? `box-shadow:inset 3px 0 0 ${RED}` : ''}">
+      <td class="num" style="color:var(--text-faint)">#${rank}</td>
+      <td style="white-space:nowrap">${live ? `<span style="color:${GREEN}">●</span> ` : ''}<span class="caret" style="color:var(--text-faint)">▸</span> ${hhmmss(g.t)}</td>
+      <td>${g.text ? esc(g.text.slice(0, 52)) + (g.text.length > 52 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
+      <td style="min-width:150px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="flex:1;height:14px;background:rgba(204,204,220,0.06);border-radius:2px;overflow:hidden;position:relative">
+            <div style="position:absolute;inset:0;width:${barW}%;display:flex">${distBar(g).replace('<div class="dist"', '<div style="display:flex;width:100%"').replace(/max-width:180px|min-width:110px/g, '')}</div>
+          </div>
+          <span class="num" style="min-width:52px">${fmtTok(tot)}</span>
+        </div>
+        <div style="font-size:11px;color:${rz.color};margin-top:3px">${rz.text}</div>
+      </td>
+      <td>${toolsCell(g)}</td>
+      <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
+    </tr>${detailRow(g)}`;
+  };
+
+  panel.innerHTML = `<div class="panel-title">Prompt spend — which prompts cost the most
+      <span class="desc">${isLive ? `<span style="color:${GREEN}">● live</span> · ` : ''}ranked; click a row for the per-call breakdown</span>
+      <span style="margin-left:auto;display:flex;gap:0;border:1px solid var(--panel-border);border-radius:2px;overflow:hidden;font-size:11px">
+        <button id="ps-cost" style="background:${promptSort === 'cost' ? '#3d71d9' : 'var(--panel)'};color:${promptSort === 'cost' ? '#fff' : 'var(--text-dim)'};border:none;padding:3px 9px;cursor:pointer;font-family:var(--font)">Most expensive</button>
+        <button id="ps-recent" style="background:${promptSort === 'recent' ? '#3d71d9' : 'var(--panel)'};color:${promptSort === 'recent' ? '#fff' : 'var(--text-dim)'};border:none;padding:3px 9px;cursor:pointer;font-family:var(--font)">Recent</button>
+      </span></div>
+    <div class="panel-body">
+      ${headline}
+      <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div>
+      <table>
+      <tr><th class="num">#</th><th>Time</th><th>Prompt</th><th>Tokens · why</th><th>Tools</th><th class="num">Duration</th></tr>
+      ${ordered.map(rowHTML).join('')}
       </table></div>`;
-    // toggle detail rows
-    table.querySelectorAll('tr.prow').forEach(row => {
-      row.addEventListener('click', () => {
-        const detail = row.nextElementSibling as HTMLElement | null;
-        const caret = row.querySelector('.caret') as HTMLElement | null;
-        if (detail && detail.classList.contains('detail')) {
-          const open = detail.style.display !== 'none';
-          detail.style.display = open ? 'none' : '';
-          if (caret) caret.textContent = open ? '▸' : '▾';
-        }
-      });
+
+  panel.querySelectorAll('tr.prow').forEach(row => {
+    row.addEventListener('click', () => {
+      const detail = row.nextElementSibling as HTMLElement | null;
+      const caret = row.querySelector('.caret') as HTMLElement | null;
+      if (detail && detail.classList.contains('detail')) {
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : '';
+        if (caret) caret.textContent = open ? '▸' : '▾';
+      }
     });
-    root.appendChild(table);
-  }
+  });
+  panel.querySelector('#ps-cost')?.addEventListener('click', (e) => { e.stopPropagation(); promptSort = 'cost'; renderEvents(); });
+  panel.querySelector('#ps-recent')?.addEventListener('click', (e) => { e.stopPropagation(); promptSort = 'recent'; renderEvents(); });
+  root.appendChild(panel);
 }
 
 function render(s: Summary) {
