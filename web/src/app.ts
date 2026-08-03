@@ -256,55 +256,29 @@ async function refreshEvents() {
   } catch { /* server away */ }
 }
 
-// Setup checklist: lexometer can't see Claude Code's environment, so each item
-// is verified by whether its data actually arrives — ground truth, not claims.
+// Data source panel: there's nothing to configure — lexometer reads Claude Code's
+// transcript files directly — so this just reports what it's reading.
 function renderSetup() {
   const root = document.getElementById('setup-root');
   const s = lastSummary;
   if (!root || !s) return;
 
-  const fresh = (ts: number) => ts > 0;
-  const ago = (ts: number) => ts > 0 ? `last data ${Math.max(0, s.now - ts)}s ago` : '';
-  const hasSkillsFlag = (s.rows ?? []).some(r => r.labels['skills_enabled']);
-  const skillsVals = [...new Set((s.rows ?? []).map(r => r.labels['skills_enabled']).filter(Boolean))].join(', ');
-  const hasPromptText = eventsCache.some(e => e.name.includes('user_prompt') && promptText(e.attrs) !== '');
-
-  interface Check { ok: boolean; label: string; detail: string; fix: string; optional?: boolean }
-  const checks: Check[] = [
-    {
-      ok: fresh(s.lastReceived), label: 'Metrics stream',
-      detail: fresh(s.lastReceived) ? ago(s.lastReceived) : 'no metrics ever received',
-      fix: 'export CLAUDE_CODE_ENABLE_TELEMETRY=1\nexport OTEL_METRICS_EXPORTER=otlp\nexport OTEL_EXPORTER_OTLP_PROTOCOL=http/json\nexport OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318',
-    },
-    {
-      ok: fresh(s.logsLastReceived), label: 'Events stream (per-prompt views)',
-      detail: fresh(s.logsLastReceived) ? ago(s.logsLastReceived) : 'no log events received — the Prompts and context-buildup panels need this',
-      fix: 'export OTEL_LOGS_EXPORTER=otlp',
-    },
-    {
-      ok: hasSkillsFlag, label: 'Experiment flag (before/after)',
-      detail: hasSkillsFlag ? `skills_enabled seen: ${skillsVals}` : 'no skills_enabled label on any data — the before/after panel needs it',
-      fix: 'export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"   # flip to true when you enable an intervention',
-    },
-    {
-      ok: hasPromptText, label: 'Prompt text (optional)', optional: true,
-      detail: hasPromptText ? 'prompt text included in events' : 'prompts show as length only — opt in to log the text itself',
-      fix: 'export OTEL_LOG_USER_PROMPTS=1',
-    },
-  ];
-
-  const missing = checks.filter(c => !c.ok && !c.optional).length;
-  const rowsHTML = checks.map(c => `
+  const sessions = Math.round(sum(s.rows ?? [], r => r.metric === 'claude_code.session.count'));
+  const ago = s.lastReceived > 0 ? `last activity ${Math.max(0, s.now - s.lastReceived)}s ago` : 'no sessions found yet';
+  const item = (label: string, detail: string) => `
     <div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(204,204,220,0.05)">
-      <span style="flex:none;width:16px;color:${c.ok ? '#73BF69' : c.optional ? 'rgba(204,204,220,0.4)' : '#F2495C'}">${c.ok ? '✓' : c.optional ? '○' : '✗'}</span>
-      <span style="flex:none;min-width:220px">${c.label}</span>
-      <span style="flex:1;color:rgba(204,204,220,0.5);font-size:12px">${c.detail}</span>
-    </div>
-    ${c.ok ? '' : `<pre style="margin:4px 0 8px 26px;font-family:var(--mono);font-size:11.5px;background:#0b0c0e;border:1px solid #23262b;border-radius:4px;padding:8px 10px;overflow-x:auto;color:#FADE2A">${c.fix}</pre>`}`).join('');
+      <span style="flex:none;width:16px;color:#73BF69">✓</span>
+      <span style="flex:none;min-width:240px">${label}</span>
+      <span style="flex:1;color:rgba(204,204,220,0.5);font-size:12px">${detail}</span>
+    </div>`;
 
-  root.innerHTML = `<div class="panel" style="margin-bottom:8px"><div class="panel-title">Telemetry setup
-    <span class="desc">${missing === 0 ? 'everything wired — detected from live data, not from claimed config' : `${missing} piece${missing > 1 ? 's' : ''} missing — add to your shell profile, then start a new Claude Code session`}</span></div>
-    <div class="panel-body" style="font-size:13px">${rowsHTML}</div></div>`;
+  root.innerHTML = `<div class="panel" style="margin-bottom:8px"><div class="panel-title">Data source
+    <span class="desc">Claude Code transcripts — read directly, no telemetry setup required</span></div>
+    <div class="panel-body" style="font-size:13px">
+      ${item('Reading <code>~/.claude/projects</code>', `${sessions} session${sessions === 1 ? '' : 's'} across all projects · ${ago}`)}
+      ${item('Real token accounting', 'input / cache / output tokens come straight from each request’s <code>usage</code> — exact, not estimated')}
+      ${item('Per-prompt views &amp; prompt text', 'reconstructed from the transcript itself — no opt-in flag needed')}
+    </div></div>`;
 }
 
 function renderEvents() {
@@ -318,7 +292,7 @@ function renderEvents() {
   const reqs = evs.filter(e => e.name.includes('api_request'));
   if (reqs.length === 0) {
     root.innerHTML = `<div class="panel"><div class="panel-title">Per-prompt performance
-      <span class="desc">needs the events stream — add <code>export OTEL_LOGS_EXPORTER=otlp</code> to your shell profile and restart your Claude Code session</span></div></div>`;
+      <span class="desc">no requests parsed yet — start or resume a Claude Code session and this fills in from its transcript</span></div></div>`;
     return;
   }
 
@@ -335,7 +309,7 @@ function renderEvents() {
   // group api_requests + tool events under the user_prompt that caused them, per session
   interface Req { cr: number; cc: number; inp: number; out: number; tools: string[] }
   interface Group {
-    t: number; text: string; len: number; calls: number; durMs: number;
+    t: number; text: string; len: number; calls: number;
     cr: number; cc: number; inp: number; out: number; tools: Map<string, number>;
     reqs: Req[]; pendingTools: string[];
   }
@@ -345,7 +319,7 @@ function renderEvents() {
     if (e.name.includes('user_prompt')) {
       const g: Group = {
         t: e.t, text: promptText(e.attrs), len: num(e.attrs, 'prompt_length'),
-        calls: 0, durMs: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
+        calls: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
         reqs: [], pendingTools: [],
       };
       groups.push(g);
@@ -358,7 +332,6 @@ function renderEvents() {
         const cr = num(e.attrs, 'cache_read_tokens'), cc = num(e.attrs, 'cache_creation_tokens');
         const inp = num(e.attrs, 'input_tokens'), out = num(e.attrs, 'output_tokens');
         g.cr += cr; g.cc += cc; g.inp += inp; g.out += out;
-        g.durMs += num(e.attrs, 'duration_ms');
         // tools observed since the previous request produced this call's new context
         g.reqs.push({ cr, cc, inp, out, tools: g.pendingTools });
         g.pendingTools = [];
@@ -446,7 +419,7 @@ function renderEvents() {
         <td class="num" style="color:${YELLOW}">out ${fmtTok(rq.out)}</td>
       </tr>`;
     }).join('');
-    return `<tr class="detail" style="display:none"><td colspan="6" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
+    return `<tr class="detail" style="display:none"><td colspan="5" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
   };
 
   const rowHTML = (g: Group): string => {
@@ -470,7 +443,6 @@ function renderEvents() {
         <div style="font-size:11px;color:${rz.color};margin-top:3px">${rz.text}</div>
       </td>
       <td>${toolsCell(g)}</td>
-      <td class="num">${(g.durMs / 1000).toFixed(1)}s</td>
     </tr>${detailRow(g)}`;
   };
 
@@ -484,7 +456,7 @@ function renderEvents() {
       ${headline}
       <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div>
       <table>
-      <tr><th class="num">#</th><th>Time</th><th>Prompt</th><th>Tokens · why</th><th>Tools</th><th class="num">Duration</th></tr>
+      <tr><th class="num">#</th><th>Time</th><th>Prompt</th><th>Tokens · why</th><th>Tools</th></tr>
       ${ordered.map(rowHTML).join('')}
       </table></div>`;
 
@@ -509,22 +481,18 @@ function render(s: Summary) {
   const rows = s.rows ?? [];
   const live = s.lastReceived > 0 && s.now - s.lastReceived < 120;
   statusEl.className = live ? 'live' : '';
-  statusText.textContent = s.lastReceived === 0 ? 'waiting for telemetry…'
-    : `last data ${Math.max(0, s.now - s.lastReceived)}s ago`;
+  statusText.textContent = s.lastReceived === 0 ? 'reading Claude Code sessions…'
+    : `last activity ${Math.max(0, s.now - s.lastReceived)}s ago`;
 
   for (const p of plots) destroyPlot(p);
   plots = [];
   tip.style.display = 'none';
 
   if (rows.length === 0) {
-    app.innerHTML = `<div id="empty"><strong>No telemetry yet.</strong> Point Claude Code at lexometer and start a session:
-<pre>export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=otlp
-export OTEL_LOGS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"</pre>
-Flip <code>skills_enabled</code> to <code>true</code> when you enable an intervention — the dashboard splits before/after on it.</div>`;
+    app.innerHTML = `<div id="empty"><strong>No Claude Code sessions found.</strong>
+      lexometer reads your transcript files from <code>~/.claude/projects</code> — nothing to configure.
+      Start (or resume) a Claude Code session and its usage will appear here within a couple of seconds.
+      <pre>lexometer --projects ~/.claude/projects   # the default; override only if yours lives elsewhere</pre></div>`;
     return;
   }
 
@@ -620,10 +588,10 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
 }
 
 // ---- realtime panel: driven by the WebSocket, no polling ----
-// The token total only changes when a telemetry batch arrives — which is
-// exactly when the WS pushes a summary — so feedLive() is called from the
-// summary handler. No /api/live, no per-second fetch. The line is the token
-// rate (tokens since last batch ÷ elapsed) over a rolling ~200-point window.
+// The token total only changes when a transcript grows — which is exactly when
+// the WS pushes a summary — so feedLive() is called from the summary handler.
+// No /api/live, no per-second fetch. The line is the token rate (tokens since
+// last update ÷ elapsed) over a rolling ~200-point window.
 const LIVE_POINTS = 200;
 let plotsLive: uPlot | null = null;
 let liveXs: number[] = [], liveYs: (number | null)[] = [];
@@ -634,7 +602,7 @@ function initLive() {
   const liveRoot = document.getElementById('live')!;
   const panel = document.createElement('div');
   panel.className = 'panel';
-  panel.innerHTML = `<div class="panel-title">Live <span class="desc">token rate · updates on each telemetry batch (pushed over WebSocket)</span>
+  panel.innerHTML = `<div class="panel-title">Live <span class="desc">token rate · updates as new transcript activity is detected</span>
     <span class="rate" id="live-rate"></span></div><div class="panel-body"></div>`;
   liveRoot.appendChild(panel);
   const body = panel.querySelector('.panel-body') as HTMLElement;
@@ -712,167 +680,6 @@ async function loadAttribution() {
   }
 }
 
-// ---- session pruning (Sessions tab) ----
-interface SessionInfo {
-  path: string; project: string; id: string; sizeBytes: number;
-  images: number; estTokenReads: number; turns: number;
-  modifiedUnix: number; open: boolean; hasBackup: boolean;
-}
-
-const fmtBytes = (b: number) =>
-  b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' MB' :
-  b >= 1e3 ? (b / 1e3).toFixed(0) + ' KB' : b + ' B';
-const agoStr = (unix: number) => {
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - unix);
-  if (s < 90) return 'just now';
-  if (s < 5400) return Math.round(s / 60) + 'm ago';
-  if (s < 129600) return Math.round(s / 3600) + 'h ago';
-  return Math.round(s / 86400) + 'd ago';
-};
-
-let sessionsLoaded = false;
-
-async function loadSessions() {
-  const root = document.getElementById('sessions');
-  if (!root) return;
-  sessionsLoaded = true;
-  root.innerHTML = `<div class="panel"><div class="panel-title">Prune session context
-    <span class="desc">scanning transcripts…</span></div></div>`;
-  let list: SessionInfo[];
-  try {
-    list = await (await fetch('/api/sessions')).json() as SessionInfo[];
-  } catch {
-    root.innerHTML = `<div class="panel"><div class="panel-title">Prune session context
-      <span class="desc">could not read transcripts</span></div></div>`;
-    return;
-  }
-
-  const badge = document.querySelector('#tabs button[data-pane="sessions"]');
-  if (badge) badge.innerHTML = 'Sessions' + (list.length ? ` <span class="badge">${list.length}</span>` : '');
-
-  // Plain-language explainer so the button's effect is never a mystery.
-  const explain = `<div class="explain">
-    <strong>What “Prune images” does:</strong> it rewrites this session’s saved transcript file on disk,
-    replacing every pasted screenshot with a tiny <code>[image pruned]</code> placeholder. Images are the
-    biggest thing a long session re-sends on every single turn.
-    <ul>
-      <li>⏱ <strong>Applies on resume, not now.</strong> It changes nothing about a running session — it takes effect the next time you open this one with <code>claude --resume</code>.</li>
-      <li>💾 <strong>Reversible.</strong> Your original transcript is copied to a <code>.bak</code> first; <em>restore original</em> puts it straight back.</li>
-      <li>🔒 <strong>Won’t touch an open session.</strong> Anything used in the last 2 minutes is locked.</li>
-    </ul>
-    It shrinks what every future turn re-sends. It does <em>not</em> refund tokens you’ve already spent.</div>`;
-
-  if (list.length === 0) {
-    root.innerHTML = `<div class="panel"><div class="panel-title">Prune session context
-      <span class="desc">reclaim re-sent image tokens from saved sessions</span></div>
-      <div class="panel-body">${explain}
-      <div style="color:var(--text-dim);font-size:13px">✓ No pasted images are stuck in any transcript right now — nothing to prune.</div></div></div>`;
-    return;
-  }
-
-  // The default action cell for a row (Prune, plus Restore if a backup exists).
-  const actions = (i: number): string => {
-    const s = list[i]!;
-    if (s.open) return `<span style="color:var(--text-faint);font-size:11.5px">in use — close it in Claude Code to prune</span>`;
-    const restore = s.hasBackup ? ` <button class="act restore" data-restore="${i}">restore original</button>` : '';
-    return `<button class="act prune" data-prune="${i}">Prune images</button>${restore}`;
-  };
-
-  const rows = list.map((s, i) => `<tr data-row="${i}">
-      <td><span title="${esc(s.path)}">${esc(s.project)}</span>
-        <div style="color:var(--text-faint);font-size:11px;font-family:var(--mono)">${esc(s.id.slice(0, 8))}</div></td>
-      <td class="num" data-size="${i}">${fmtBytes(s.sizeBytes)}</td>
-      <td class="num">${s.images}</td>
-      <td class="num" title="each image’s tokens × the turns it is re-sent after it appears">~${fmtTok(s.estTokenReads)}</td>
-      <td class="num" style="color:${s.open ? 'var(--red)' : 'var(--text-dim)'}">${s.open ? 'open now' : agoStr(s.modifiedUnix)}</td>
-      <td style="white-space:nowrap"><span class="cell-actions" data-cell="${i}">${actions(i)}</span></td>
-    </tr>`).join('');
-
-  root.innerHTML = `<div class="panel"><div class="panel-title">Prune session context
-      <span class="desc">reclaim re-sent image tokens from saved sessions</span></div>
-    <div class="panel-body">${explain}
-      <table>
-        <tr><th>Session</th><th class="num">Size</th><th class="num">Images</th>
-          <th class="num">Saved / resume</th><th class="num">Last used</th><th>Action</th></tr>
-        ${rows}
-      </table>
-      <div style="font-size:11.5px;color:var(--text-faint);margin-top:8px">
-        “Saved / resume” = image tokens × the turns they’re re-sent — what you stop re-paying each time you resume that session.
-        <a href="#" id="sess-refresh" style="color:var(--blue)">refresh</a></div></div></div>`;
-
-  const setCell = (i: number, html: string) => {
-    const cell = root.querySelector(`[data-cell="${i}"]`) as HTMLElement | null;
-    if (cell) cell.innerHTML = html;
-  };
-
-  // One delegated handler — survives the innerHTML swaps we do inside cells.
-  root.addEventListener('click', async (ev) => {
-    const el = ev.target as HTMLElement;
-    const prune = el.closest('[data-prune]') as HTMLElement | null;
-    const doIt = el.closest('[data-confirm]') as HTMLElement | null;
-    const cancel = el.closest('[data-cancel]') as HTMLElement | null;
-    const restore = el.closest('[data-restore]') as HTMLElement | null;
-
-    // step 1: clicking Prune reveals exactly what will happen, and asks to confirm
-    if (prune) {
-      const i = +prune.dataset.prune!;
-      setCell(i, `<span class="q">Rewrite this transcript now? Keeps a <code style="font-family:var(--mono)">.bak</code>, takes effect on your next <code style="font-family:var(--mono)">--resume</code>.</span>
-        <button class="act prune confirm" data-confirm="${i}">Yes, prune</button>
-        <button class="act" data-cancel="${i}">Cancel</button>`);
-      return;
-    }
-    if (cancel) { const i = +cancel.dataset.cancel!; setCell(i, actions(i)); return; }
-
-    // step 2: confirmed — do the rewrite and report the concrete before → after
-    if (doIt) {
-      const i = +doIt.dataset.confirm!;
-      setCell(i, `<span class="q">Pruning…</span>`);
-      try {
-        const r = await fetch('/api/prune', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: list[i]!.path }),
-        });
-        const res = await r.json();
-        if (!r.ok) {
-          setCell(i, `<span class="sess-note err">${esc(res.error ?? 'failed')}</span> <button class="act prune" data-prune="${i}">try again</button>`);
-          return;
-        }
-        list[i]!.hasBackup = true; list[i]!.sizeBytes = res.bytesAfter;
-        const sizeEl = root.querySelector(`[data-size="${i}"]`);
-        if (sizeEl) sizeEl.textContent = fmtBytes(res.bytesAfter);
-        setCell(i, `<span class="sess-note ok">✓ ${res.images} image${res.images === 1 ? '' : 's'} removed · ${fmtBytes(res.bytesBefore)} → ${fmtBytes(res.bytesAfter)} · <code style="font-family:var(--mono);color:inherit">.bak</code> saved · applies on next resume</span>
-          <button class="act restore" data-restore="${i}">restore original</button>`);
-      } catch {
-        setCell(i, `<span class="sess-note err">request failed</span> <button class="act prune" data-prune="${i}">try again</button>`);
-      }
-      return;
-    }
-
-    if (restore) {
-      const i = +restore.dataset.restore!;
-      setCell(i, `<span class="q">Restoring…</span>`);
-      try {
-        const r = await fetch('/api/restore', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: list[i]!.path }),
-        });
-        const res = await r.json();
-        if (!r.ok) {
-          setCell(i, `<span class="sess-note err">${esc(res.error ?? 'failed')}</span>`);
-          return;
-        }
-        setCell(i, `<span class="sess-note ok">✓ original restored</span>`);
-        loadSessions(); // pull accurate sizes back
-      } catch {
-        setCell(i, `<span class="sess-note err">request failed</span>`);
-      }
-      return;
-    }
-  });
-
-  document.getElementById('sess-refresh')?.addEventListener('click', (e) => { e.preventDefault(); loadSessions(); });
-}
-
 // ---- tab switching ----
 function initTabs() {
   const tabs = document.getElementById('tabs');
@@ -884,7 +691,6 @@ function initTabs() {
       document.querySelectorAll<HTMLElement>('section.pane').forEach(p => {
         p.hidden = p.dataset.pane !== target;
       });
-      if (target === 'sessions' && !sessionsLoaded) loadSessions();
     });
   });
 }
@@ -900,7 +706,7 @@ async function tick() {
 }
 
 // Live updates over WebSocket: the server pushes a full summary on connect and
-// after every telemetry batch. Polling remains as the fallback while the socket
+// whenever a transcript changes. Polling remains as the fallback while the socket
 // is down (and as a slow keepalive refresh for the "last data Ns ago" counter).
 let wsOpen = false;
 function connect() {

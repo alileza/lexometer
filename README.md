@@ -1,11 +1,12 @@
 # lexometer
 
-A single binary that watches your Claude Code usage. It speaks OTLP natively —
-no Prometheus, no Grafana, no Docker, no collector. One process, one port, one
+A single binary that shows you where your Claude Code tokens go. It reads Claude
+Code's own session transcripts directly — no telemetry exporter, no env vars, no
+Prometheus, no Grafana, no Docker, no collector. One process, one port, one
 dashboard.
 
 ```
-Claude Code ──OTLP/HTTP──▶ lexometer ──▶ http://localhost:4318
+~/.claude/projects/*.jsonl ──watch──▶ lexometer ──▶ http://localhost:4318
 ```
 
 ## Install
@@ -15,54 +16,57 @@ go install github.com/alileza/lexometer@latest
 lexometer
 ```
 
-Then enable Claude Code's built-in telemetry (add to your shell profile):
+That's the whole setup. Open **http://localhost:4318**. lexometer reads your
+existing transcripts, so your full history is there immediately — total tokens by
+type (cacheRead / cacheCreation / output / input), tokens per hour, sessions,
+active time, a per-prompt cost breakdown (with the real prompt text), and which
+files and tools fill the context.
 
-```bash
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=otlp
-export OTEL_LOGS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-export OTEL_RESOURCE_ATTRIBUTES="skills_enabled=false"
+It tails the transcript files, so new activity shows up within a couple of
+seconds while you work — the dashboard pushes updates live over WebSocket.
+
+## Why read the transcripts instead of OTLP?
+
+Claude Code writes every session to a JSONL transcript under `~/.claude/projects`,
+and every assistant message already carries the API response's real `usage`
+(input / cache-read / cache-creation / output tokens), the model, and a timestamp.
+So the files contain exactly the accounting OTLP would emit — plus the full prompt
+and tool content — and reading them means:
+
+- **No setup.** No `OTEL_*` exporter config, no restarting your session.
+- **Full history, retroactively.** Every past session counts, not just the ones
+  after you turned telemetry on.
+- **Real numbers.** Token counts come straight from each request's `usage`, not
+  estimates; per-prompt views and prompt text need no opt-in flag.
+
+## Flags
+
 ```
-
-Open **http://localhost:4318** — cost per day, tokens per day by type
-(cacheRead / cacheCreation / output / input), session count, and a table of every
-metric received.
-
-## Before/after comparison
-
-`skills_enabled` in `OTEL_RESOURCE_ATTRIBUTES` is an experiment flag. Leave it
-`false` while collecting your baseline; flip it to `true` the day you enable an
-intervention (token-reduction skills, hooks, a new tool). Once both phases have
-data, the dashboard shows average cost per active day in each phase and the
-percent change — your own measured number, not a vendor claim.
+-addr      listen address for the dashboard (default :4318)
+-projects  Claude Code projects dir to watch (default ~/.claude/projects)
+-poll      how often to re-scan transcripts for new activity (default 2s)
+```
 
 ## Details
 
-- Data is stored in `~/.lexometer/data.json` (override with `-data`), bucketed
-  hourly. Cumulative OTLP sums are converted to deltas per session stream, so
-  session restarts don't double-count.
-- Listens on `:4318` (the OTLP/HTTP default; override with `-addr`). `/v1/logs`
-  and `/v1/traces` are accepted and discarded so exporters see no errors.
+- Nothing is persisted — the transcript files are the source of truth, so a
+  restart just rebuilds from disk. On start it reads all history once, then tails
+  each file, parsing only newly appended lines.
 - The dashboard updates live over WebSocket (`/ws`, hand-rolled RFC 6455,
-  server-push only): a snapshot on connect, a push after every telemetry batch,
+  server-push only): a snapshot on connect, a push whenever a transcript changes,
   automatic fallback to polling if the socket drops.
 - Zero Go dependencies; the dashboard is TypeScript rendered with
   [uPlot](https://github.com/leeoniya/uPlot) — the same charting library Grafana's
-  Time series panel uses — bundled and embedded in the binary. Grafana-style
-  behavior included: shared crosshair with a multi-series tooltip, click-to-toggle
-  legend, drag-to-zoom (double-click to reset), and 6h/24h/7d/30d/All range
-  presets. `make build` rebuilds both.
-- State is saved every 30 seconds and on SIGINT/SIGTERM/SIGHUP, so a terminated
-  process picks up exactly where it left off.
+  Time series panel uses — bundled and embedded in the binary. `make build`
+  rebuilds both.
 
 ## Why not Prometheus + Grafana?
 
-[claude-otlp-example](https://github.com/alileza/claude-otlp-example) does the
-same job with the full stack — collector, Prometheus, Grafana, three containers.
-It works, but it's a lot of machinery for one person's usage metrics. lexometer
-is the same telemetry with none of the operational surface.
+[claude-otlp-example](https://github.com/alileza/claude-otlp-example) does a
+related job with the full OTLP stack — collector, Prometheus, Grafana, three
+containers, and the same exporter env vars. It works, but it's a lot of machinery,
+and it only sees usage from the moment you wire it up. lexometer needs none of
+that and reads what Claude Code already wrote.
 
 ## License
 

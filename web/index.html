@@ -109,33 +109,6 @@
   .u-legend tr.u-off th, .u-legend tr.u-off td { opacity: 0.35; }
   .u-select { background: rgba(87,148,242,0.15); border: 1px solid rgba(87,148,242,0.4); }
 
-  /* session prune controls */
-  button.act {
-    font-family: var(--font); font-size: 12px; border-radius: 3px; cursor: pointer;
-    border: 1px solid var(--panel-border); background: var(--panel); color: var(--text);
-    padding: 4px 10px;
-  }
-  button.act:hover { border-color: var(--text-faint); }
-  button.act.prune { border-color: rgba(255,152,48,0.5); color: var(--orange); }
-  button.act.prune.confirm { background: var(--orange); color: #111; border-color: var(--orange); font-weight: 600; }
-  button.act.restore { color: var(--text-dim); }
-  button.act:disabled { opacity: 0.4; cursor: not-allowed; }
-  .sess-note { font-size: 12px; }
-  .sess-note.ok { color: var(--green); }
-  .sess-note.err { color: var(--red); }
-  .cell-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .cell-actions .q { color: var(--text-dim); font-size: 11.5px; }
-
-  .explain {
-    background: rgba(87,148,242,0.07); border: 1px solid rgba(87,148,242,0.22);
-    border-radius: 3px; padding: 10px 12px; margin-bottom: 12px;
-    font-size: 12.5px; color: var(--text-dim); line-height: 1.6;
-  }
-  .explain strong { color: var(--text); font-weight: 600; }
-  .explain ul { list-style: none; margin: 7px 0 6px; }
-  .explain li { padding: 1px 0; }
-  .explain code { font-family: var(--mono); color: var(--yellow); background: rgba(0,0,0,0.25); padding: 0 4px; border-radius: 3px; }
-
   #tip {
     position: fixed; pointer-events: none; z-index: 50; display: none;
     background: #1f2228; border: 1px solid #2c3038; color: var(--text);
@@ -152,12 +125,12 @@
 <body>
 <header>
   <span class="mark">L</span><span class="name">lexometer</span>
-  <span id="status"><span class="dot"></span><span id="status-text">waiting for telemetry…</span></span>
+  <span id="status"><span class="dot"></span><span id="status-text">reading Claude Code sessions…</span></span>
 </header>
 <nav class="tabs" id="tabs">
   <button data-pane="overview" class="active">Overview</button>
   <button data-pane="prompts">Prompts</button>
-  <button data-pane="sessions">Sessions</button>
+  <button data-pane="context">Context</button>
 </nav>
 <main>
   <section class="pane" data-pane="overview">
@@ -166,8 +139,8 @@
   <section class="pane" data-pane="prompts" hidden>
     <div id="setup-root"></div><div id="events-root"></div>
   </section>
-  <section class="pane" data-pane="sessions" hidden>
-    <div id="attr"></div><div id="sessions"></div>
+  <section class="pane" data-pane="context" hidden>
+    <div id="attr"></div>
   </section>
 </main>
 <div id="tip"></div>

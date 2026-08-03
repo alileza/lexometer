@@ -1,53 +1,37 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Store aggregates OTLP datapoints into hourly buckets keyed by metric name and
-// a coarse label set (model, type, skills_enabled). Cumulative sums are converted
-// to deltas per fine-grained stream (all attributes incl. session.id), so restarts
-// of Claude Code sessions don't double-count.
+// Store aggregates datapoints into hourly buckets keyed by metric name and a
+// coarse label set (model, type). It's fed by the transcript watcher; the .jsonl
+// files are the source of truth, so nothing is persisted — a restart rebuilds it.
 type Store struct {
 	mu sync.Mutex
 
-	// last cumulative value per fine stream key
-	Streams map[string]float64 `json:"streams"`
+	// last cumulative value per fine stream key (unused by the transcript source,
+	// which emits deltas, but kept so Add stays general).
+	Streams map[string]float64
 	// hour(unix sec) -> metric -> coarse labels -> summed value
-	Buckets map[int64]map[string]map[string]float64 `json:"buckets"`
+	Buckets map[int64]map[string]map[string]float64
 
-	LastReceived     int64 `json:"lastReceived"`
-	LogsLastReceived int64 `json:"logsLastReceived"`
+	LastReceived     int64
+	LogsLastReceived int64
 
-	// recent telemetry log events (user_prompt, api_request, …), oldest first
-	EventLog []Event `json:"events"`
-
-	path  string
-	dirty bool
+	// recent reconstructed log events (user_prompt, api_request, …), oldest first
+	EventLog []Event
 }
 
-func NewStore(path string) (*Store, error) {
-	s := &Store{
+// NewMemStore returns an in-memory store with no persistence.
+func NewMemStore() *Store {
+	return &Store{
 		Streams: map[string]float64{},
 		Buckets: map[int64]map[string]map[string]float64{},
-		path:    path,
 	}
-	b, err := os.ReadFile(path)
-	if err == nil {
-		if err := json.Unmarshal(b, s); err != nil {
-			return nil, err
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	return s, nil
 }
 
 // coarse labels kept on buckets; everything else only distinguishes streams.
@@ -93,7 +77,6 @@ func (s *Store) Add(metric string, attrs map[string]string, tsNano int64, value 
 		if seen && value >= last {
 			delta = value - last
 		}
-		// new stream, or counter reset (value < last): take the full value
 		s.Streams[fk] = value
 	}
 	if delta == 0 {
@@ -108,8 +91,28 @@ func (s *Store) Add(metric string, attrs map[string]string, tsNano int64, value 
 		s.Buckets[hour][metric] = map[string]float64{}
 	}
 	s.Buckets[hour][metric][coarseKey(attrs)] += delta
-	s.LastReceived = time.Now().Unix()
-	s.dirty = true
+}
+
+// AddEvent appends a reconstructed log event, ring-buffered at maxEvents.
+func (s *Store) AddEvent(e Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.EventLog = append(s.EventLog, e)
+	if len(s.EventLog) > maxEvents*12/10 {
+		s.EventLog = s.EventLog[len(s.EventLog)-maxEvents:]
+	}
+}
+
+// SetActivity pins the dashboard's "live" / "last data Ns ago" indicators to the
+// newest transcript message time (not wall-clock, which would make week-old data
+// look live).
+func (s *Store) SetActivity(newestSec int64, haveEvents bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastReceived = newestSec
+	if haveEvents {
+		s.LogsLastReceived = newestSec
+	}
 }
 
 type Row struct {
@@ -163,149 +166,8 @@ func (s *Store) Summary() Summary {
 	return out
 }
 
-func (s *Store) Save() error {
-	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
-		return nil
-	}
-	b, err := json.Marshal(s)
-	s.dirty = false
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
-}
-
-// ---- OTLP/HTTP JSON payload (the subset we need) ----
-
-type otlpAnyValue struct {
-	StringValue *string  `json:"stringValue"`
-	IntValue    *string  `json:"intValue"`
-	DoubleValue *float64 `json:"doubleValue"`
-	BoolValue   *bool    `json:"boolValue"`
-}
-
-func (v otlpAnyValue) String() string {
-	switch {
-	case v.StringValue != nil:
-		return *v.StringValue
-	case v.IntValue != nil:
-		return *v.IntValue
-	case v.DoubleValue != nil:
-		return strconv.FormatFloat(*v.DoubleValue, 'f', -1, 64)
-	case v.BoolValue != nil:
-		return strconv.FormatBool(*v.BoolValue)
-	}
-	return ""
-}
-
-type otlpKV struct {
-	Key   string       `json:"key"`
-	Value otlpAnyValue `json:"value"`
-}
-
-type otlpDataPoint struct {
-	Attributes   []otlpKV `json:"attributes"`
-	TimeUnixNano string   `json:"timeUnixNano"`
-	AsDouble     *float64 `json:"asDouble"`
-	AsInt        *string  `json:"asInt"`
-}
-
-func (d otlpDataPoint) value() (float64, bool) {
-	if d.AsDouble != nil {
-		return *d.AsDouble, true
-	}
-	if d.AsInt != nil {
-		v, err := strconv.ParseFloat(*d.AsInt, 64)
-		return v, err == nil
-	}
-	return 0, false
-}
-
-type otlpMetric struct {
-	Name string `json:"name"`
-	Sum  *struct {
-		DataPoints             []otlpDataPoint `json:"dataPoints"`
-		AggregationTemporality int             `json:"aggregationTemporality"`
-	} `json:"sum"`
-	Gauge *struct {
-		DataPoints []otlpDataPoint `json:"dataPoints"`
-	} `json:"gauge"`
-}
-
-type otlpExport struct {
-	ResourceMetrics []struct {
-		Resource struct {
-			Attributes []otlpKV `json:"attributes"`
-		} `json:"resource"`
-		ScopeMetrics []struct {
-			Metrics []otlpMetric `json:"metrics"`
-		} `json:"scopeMetrics"`
-	} `json:"resourceMetrics"`
-}
-
-const aggregationTemporalityCumulative = 2
-
-// Ingest parses an OTLP/HTTP JSON metrics export and adds every datapoint.
-func (s *Store) Ingest(body []byte) error {
-	var ex otlpExport
-	if err := json.Unmarshal(body, &ex); err != nil {
-		return err
-	}
-	for _, rm := range ex.ResourceMetrics {
-		res := map[string]string{}
-		for _, kv := range rm.Resource.Attributes {
-			res[kv.Key] = kv.Value.String()
-		}
-		for _, sm := range rm.ScopeMetrics {
-			for _, m := range sm.Metrics {
-				var points []otlpDataPoint
-				cumulative := false
-				switch {
-				case m.Sum != nil:
-					points = m.Sum.DataPoints
-					cumulative = m.Sum.AggregationTemporality == aggregationTemporalityCumulative
-				case m.Gauge != nil:
-					points = m.Gauge.DataPoints
-				}
-				for _, dp := range points {
-					v, ok := dp.value()
-					if !ok {
-						continue
-					}
-					attrs := map[string]string{}
-					for k, val := range res {
-						attrs[k] = val
-					}
-					for _, kv := range dp.Attributes {
-						attrs[kv.Key] = kv.Value.String()
-					}
-					ts, _ := strconv.ParseInt(dp.TimeUnixNano, 10, 64)
-					if ts == 0 {
-						ts = time.Now().UnixNano()
-					}
-					s.Add(m.Name, attrs, ts, v, cumulative)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// ---- OTLP log events (user_prompt, api_request, …) ----
-
-// Event is one Claude Code telemetry log record, kept verbatim so the
-// dashboard can build per-prompt views without the server guessing at
-// attribute names.
+// Event is one reconstructed Claude Code log record (from the transcript), shaped
+// like the OTLP events the dashboard's per-prompt views were built for.
 type Event struct {
 	T       int64             `json:"t"` // unix millis
 	Session string            `json:"session"`
@@ -314,77 +176,6 @@ type Event struct {
 }
 
 const maxEvents = 5000
-
-type otlpLogRecord struct {
-	TimeUnixNano         string       `json:"timeUnixNano"`
-	ObservedTimeUnixNano string       `json:"observedTimeUnixNano"`
-	Body                 otlpAnyValue `json:"body"`
-	Attributes           []otlpKV     `json:"attributes"`
-}
-
-type otlpLogsExport struct {
-	ResourceLogs []struct {
-		Resource struct {
-			Attributes []otlpKV `json:"attributes"`
-		} `json:"resource"`
-		ScopeLogs []struct {
-			LogRecords []otlpLogRecord `json:"logRecords"`
-		} `json:"scopeLogs"`
-	} `json:"resourceLogs"`
-}
-
-// IngestLogs parses an OTLP/HTTP JSON logs export and keeps each record as an
-// Event (ring-buffered at maxEvents).
-func (s *Store) IngestLogs(body []byte) error {
-	var ex otlpLogsExport
-	if err := json.Unmarshal(body, &ex); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, rl := range ex.ResourceLogs {
-		res := map[string]string{}
-		for _, kv := range rl.Resource.Attributes {
-			res[kv.Key] = kv.Value.String()
-		}
-		for _, sl := range rl.ScopeLogs {
-			for _, lr := range sl.LogRecords {
-				attrs := map[string]string{}
-				for k, v := range res {
-					attrs[k] = v
-				}
-				for _, kv := range lr.Attributes {
-					attrs[kv.Key] = kv.Value.String()
-				}
-				name := attrs["event.name"]
-				if name == "" {
-					name = lr.Body.String()
-				}
-				if name == "" {
-					continue
-				}
-				tsStr := lr.TimeUnixNano
-				if tsStr == "" || tsStr == "0" {
-					tsStr = lr.ObservedTimeUnixNano
-				}
-				ts, _ := strconv.ParseInt(tsStr, 10, 64)
-				if ts == 0 {
-					ts = time.Now().UnixNano()
-				}
-				session := attrs["session.id"]
-				s.EventLog = append(s.EventLog, Event{T: ts / 1e6, Session: session, Name: name, Attrs: attrs})
-			}
-		}
-	}
-	if len(s.EventLog) > maxEvents {
-		s.EventLog = s.EventLog[len(s.EventLog)-maxEvents:]
-	}
-	if len(ex.ResourceLogs) > 0 {
-		s.LogsLastReceived = time.Now().Unix()
-		s.dirty = true
-	}
-	return nil
-}
 
 // Events returns a copy of the retained log events, oldest first.
 func (s *Store) Events() []Event {

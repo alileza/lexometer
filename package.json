@@ -1,7 +1,7 @@
 {
   "name": "lexometer",
   "version": "1.0.0",
-  "description": "A single binary that watches your Claude Code usage. It speaks OTLP natively — no Prometheus, no Grafana, no Docker, no collector. One process, one port, one dashboard.",
+  "description": "A single binary that shows where your Claude Code tokens go, read straight from the session transcripts — no telemetry exporter, no Prometheus, no Grafana, no Docker, no collector. One process, one port, one dashboard.",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
