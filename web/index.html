@@ -44,6 +44,8 @@
   #status.live .dot { background: var(--green); box-shadow: 0 0 0 3px rgba(115,191,105,0.2); }
 
   main { max-width: 1200px; margin: 0 auto; padding: 16px 20px 48px; }
+  #live { margin-bottom: 8px; }
+  #live .rate { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--green); }
 
   .row { display: grid; gap: 8px; margin-bottom: 8px; }
   .row.stats { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
@@ -113,7 +115,7 @@
   <div id="ranges"></div>
   <span id="status"><span class="dot"></span><span id="status-text">waiting for telemetry…</span></span>
 </header>
-<main id="app"></main>
+<main><div id="live"></div><div id="app"></div></main>
 <div id="tip"></div>
 <script src="/dist/app.js"></script>
 </body>

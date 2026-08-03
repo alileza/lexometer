@@ -38,7 +38,7 @@ const fmtDur = (sec: number) => {
 };
 
 // ---- time range picker (Grafana-style presets) ----
-const RANGES: [string, number][] = [['6h', 6 * HOUR], ['24h', 24 * HOUR], ['7d', 7 * 86400], ['30d', 30 * 86400], ['All', 0]];
+const RANGES: [string, number][] = [['24h', 24 * HOUR], ['7d', 7 * 86400], ['30d', 30 * 86400], ['All', 0]];
 let activeRange = '7d';
 for (const [name] of RANGES) {
   const b = document.createElement('button');
@@ -154,7 +154,7 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
     series,
     legend: { live: false },
     cursor: {
-      drag: { x: true, y: false },
+      drag: { x: false, y: false },
       points: { size: 6, width: 2 },
     },
     scales: {
@@ -331,6 +331,62 @@ window.addEventListener('resize', () => {
   }
 });
 
+// ---- realtime panel: 1s sampling of /api/live, rolling 10-minute window ----
+// (same pattern as a live admin panel: poll fast, keep client-side history,
+// plot the per-second delta as a rate — no zoom, it just scrolls)
+const LIVE_WINDOW = 600;
+function initLive() {
+  const liveRoot = document.getElementById('live')!;
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.innerHTML = `<div class="panel-title">Live <span class="desc">tokens per second, last 10 minutes · updates every second</span>
+    <span class="rate" id="live-rate"></span></div><div class="panel-body"></div>`;
+  liveRoot.appendChild(panel);
+  const body = panel.querySelector('.panel-body') as HTMLElement;
+  const rateEl = panel.querySelector('#live-rate') as HTMLElement;
+
+  const xs: number[] = [], ys: (number | null)[] = [];
+  const u = new uPlot({
+    width: Math.max(320, body.clientWidth || 1120),
+    height: 110,
+    series: [
+      {},
+      { label: 'tokens/s', stroke: GREEN, width: 2, fill: GREEN + '2e', points: { show: false } },
+    ],
+    legend: { show: false },
+    cursor: { drag: { x: false, y: false }, points: { size: 6, width: 2 } },
+    scales: {
+      x: { time: true },
+      y: { range: (_u, _min, max) => [0, Math.max(max * 1.15, 10)] },
+    },
+    axes: axisDefaults(v => fmtTok(v)),
+    plugins: [tooltipPlugin(v => v == null ? '–' : fmtTok(v) + '/s')],
+  }, [xs, ys] as uPlot.AlignedData, body);
+  plotsLive = u;
+
+  let prev: { t: number; tokens: number } | null = null;
+  const sample = async () => {
+    try {
+      const r = await fetch('/api/live');
+      const j = await r.json() as { now: number; tokens: number; cost: number };
+      const t = j.now / 1000;
+      if (prev && t > prev.t) {
+        const rate = Math.max(0, (j.tokens - prev.tokens) / (t - prev.t));
+        xs.push(t);
+        ys.push(rate);
+        if (xs.length > LIVE_WINDOW) { xs.shift(); ys.shift(); }
+        u.setData([xs, ys] as uPlot.AlignedData);
+        rateEl.textContent = rate > 0 ? `▲ ${fmtTok(rate)}/s` : 'idle';
+        rateEl.style.color = rate > 0 ? GREEN : 'rgba(204,204,220,0.4)';
+      }
+      prev = { t, tokens: j.tokens };
+    } catch { /* server away; the status line already says so */ }
+  };
+  sample();
+  setInterval(sample, 1000);
+}
+let plotsLive: uPlot | null = null;
+
 async function tick() {
   try {
     const res = await fetch('/api/summary');
@@ -360,5 +416,6 @@ function connect() {
 
 tick();
 connect();
+initLive();
 setInterval(() => { if (!wsOpen) tick(); }, 10_000);
 setInterval(() => { if (wsOpen) tick(); }, 30_000); // refresh relative timestamps

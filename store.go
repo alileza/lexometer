@@ -25,6 +25,9 @@ type Store struct {
 
 	LastReceived int64 `json:"lastReceived"`
 
+	// running total per metric, rebuilt from Buckets on load; feeds /api/live
+	totals map[string]float64
+
 	path  string
 	dirty bool
 }
@@ -42,6 +45,14 @@ func NewStore(path string) (*Store, error) {
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
+	}
+	s.totals = map[string]float64{}
+	for _, metrics := range s.Buckets {
+		for metric, coarse := range metrics {
+			for _, v := range coarse {
+				s.totals[metric] += v
+			}
+		}
 	}
 	return s, nil
 }
@@ -104,8 +115,21 @@ func (s *Store) Add(metric string, attrs map[string]string, tsNano int64, value 
 		s.Buckets[hour][metric] = map[string]float64{}
 	}
 	s.Buckets[hour][metric][coarseKey(attrs)] += delta
+	s.totals[metric] += delta
 	s.LastReceived = time.Now().Unix()
 	s.dirty = true
+}
+
+// Live returns running totals for the realtime panel; the client samples this
+// every second and plots the deltas as a rate.
+func (s *Store) Live() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]any{
+		"now":    time.Now().UnixMilli(),
+		"cost":   s.totals["claude_code.cost.usage"],
+		"tokens": s.totals["claude_code.token.usage"],
+	}
 }
 
 type Row struct {
