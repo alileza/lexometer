@@ -92,7 +92,7 @@ function dailyBars(svg: SVGSVGElement, days: string[], series: { name: string; c
 }
 
 function render(s: Summary) {
-  const rows = s.rows;
+  const rows = s.rows ?? [];
   const live = s.lastReceived > 0 && s.now - s.lastReceived < 120;
   statusEl.className = live ? 'live' : '';
   statusText.textContent = s.lastReceived === 0 ? 'waiting for telemetry…'
@@ -178,5 +178,25 @@ async function tick() {
     statusText.textContent = 'claudewatch unreachable';
   }
 }
+
+// Live updates over WebSocket: the server pushes a full summary on connect and
+// after every telemetry batch. Polling remains as the fallback while the socket
+// is down (and as a slow keepalive refresh for the "last data Ns ago" counter).
+let wsOpen = false;
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { wsOpen = true; };
+  ws.onmessage = (ev) => {
+    try { render(JSON.parse(ev.data as string) as Summary); } catch { /* ignore bad frame */ }
+  };
+  ws.onclose = () => {
+    wsOpen = false;
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
 tick();
-setInterval(tick, 10_000);
+connect();
+setInterval(() => { if (!wsOpen) tick(); }, 10_000);
+setInterval(() => { if (wsOpen) tick(); }, 30_000); // refresh relative timestamps

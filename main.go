@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,6 +31,11 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	hub := newWSHub()
+	summaryJSON := func() []byte {
+		b, _ := json.Marshal(store.Summary())
+		return b
+	}
 
 	// OTLP/HTTP receivers. Metrics are ingested; logs/traces are accepted and
 	// discarded so the exporter never sees errors.
@@ -44,6 +50,12 @@ func main() {
 			return
 		}
 		okJSON(w)
+		go hub.Broadcast(summaryJSON())
+	})
+
+	// live updates: pushes the full summary on connect and after every ingest
+	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
+		hub.Upgrade(w, r, func(conn net.Conn) { hub.Send(conn, summaryJSON()) })
 	})
 	mux.HandleFunc("POST /v1/logs", func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); okJSON(w) })
 	mux.HandleFunc("POST /v1/traces", func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); okJSON(w) })

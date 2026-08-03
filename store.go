@@ -139,7 +139,7 @@ func (s *Store) Summary() Summary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	out := Summary{LastReceived: s.LastReceived, Now: time.Now().Unix()}
+	out := Summary{Rows: []Row{}, Metrics: []string{}, LastReceived: s.LastReceived, Now: time.Now().Unix()}
 	seen := map[string]bool{}
 	for hour, metrics := range s.Buckets {
 		for metric, coarse := range metrics {

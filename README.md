@@ -44,6 +44,9 @@ percent change — your own measured number, not a vendor claim.
   session restarts don't double-count.
 - Listens on `:4318` (the OTLP/HTTP default; override with `-addr`). `/v1/logs`
   and `/v1/traces` are accepted and discarded so exporters see no errors.
+- The dashboard updates live over WebSocket (`/ws`, hand-rolled RFC 6455,
+  server-push only): a snapshot on connect, a push after every telemetry batch,
+  automatic fallback to polling if the socket drops.
 - Zero Go dependencies; the dashboard is TypeScript compiled to a single embedded
   JS file. `make build` rebuilds both.
 
