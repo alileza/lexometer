@@ -437,6 +437,8 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   const isSession = (r: Row) => r.metric === 'claude_code.session.count';
   const isActive = (r: Row) => r.metric === 'claude_code.active_time.total';
   const today = day(s.now);
+
+  feedLive(sum(rows, isTok), s.now); // realtime panel rides the same summary
   const model = (r: Row) => r.labels['model'] ?? 'unknown';
   const models = [...new Set(rows.filter(isCost).map(model))].sort();
   const modelColor = new Map(models.map((m, i) => [m, MODEL_PALETTE[i % MODEL_PALETTE.length]!]));
@@ -523,27 +525,33 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   app.appendChild(table);
 }
 
-// ---- realtime panel: 1s sampling of /api/live, rolling 10-minute window ----
-// (same pattern as a live admin panel: poll fast, keep client-side history,
-// plot the per-second delta as a rate — no zoom, it just scrolls)
-const LIVE_WINDOW = 600;
+// ---- realtime panel: driven by the WebSocket, no polling ----
+// The token total only changes when a telemetry batch arrives — which is
+// exactly when the WS pushes a summary — so feedLive() is called from the
+// summary handler. No /api/live, no per-second fetch. The line is the token
+// rate (tokens since last batch ÷ elapsed) over a rolling ~200-point window.
+const LIVE_POINTS = 200;
+let plotsLive: uPlot | null = null;
+let liveXs: number[] = [], liveYs: (number | null)[] = [];
+let livePrev: { t: number; tokens: number } | null = null;
+let liveRateEl: HTMLElement | null = null;
+
 function initLive() {
   const liveRoot = document.getElementById('live')!;
   const panel = document.createElement('div');
   panel.className = 'panel';
-  panel.innerHTML = `<div class="panel-title">Live <span class="desc">tokens per second, last 10 minutes · updates every second</span>
+  panel.innerHTML = `<div class="panel-title">Live <span class="desc">token rate · updates on each telemetry batch (pushed over WebSocket)</span>
     <span class="rate" id="live-rate"></span></div><div class="panel-body"></div>`;
   liveRoot.appendChild(panel);
   const body = panel.querySelector('.panel-body') as HTMLElement;
-  const rateEl = panel.querySelector('#live-rate') as HTMLElement;
+  liveRateEl = panel.querySelector('#live-rate') as HTMLElement;
 
-  const xs: number[] = [], ys: (number | null)[] = [];
   const u = new uPlot({
     width: contentWidth(body),
     height: 110,
     series: [
       {},
-      { label: 'tokens/s', stroke: GREEN, width: 2, fill: GREEN + '2e', points: { show: false } },
+      { label: 'tokens/s', stroke: GREEN, width: 2, fill: GREEN + '2e', points: { show: liveXs.length <= 60, size: 5, fill: GREEN } },
     ],
     legend: { show: false },
     cursor: { drag: { x: false, y: false }, points: { size: 6, width: 2 } },
@@ -553,32 +561,28 @@ function initLive() {
     },
     axes: axisDefaults(v => fmtTok(v)),
     plugins: [tooltipPlugin(v => v == null ? '–' : fmtTok(v) + '/s')],
-  }, [xs, ys] as uPlot.AlignedData, body);
+  }, [liveXs, liveYs] as uPlot.AlignedData, body);
   plotsLive = u;
   autosize(u, body);
-
-  let prev: { t: number; tokens: number } | null = null;
-  const sample = async () => {
-    try {
-      const r = await fetch('/api/live');
-      const j = await r.json() as { now: number; tokens: number; cost: number };
-      const t = j.now / 1000;
-      if (prev && t > prev.t) {
-        const rate = Math.max(0, (j.tokens - prev.tokens) / (t - prev.t));
-        xs.push(t);
-        ys.push(rate);
-        if (xs.length > LIVE_WINDOW) { xs.shift(); ys.shift(); }
-        u.setData([xs, ys] as uPlot.AlignedData);
-        rateEl.textContent = rate > 0 ? `▲ ${fmtTok(rate)}/s` : 'idle';
-        rateEl.style.color = rate > 0 ? GREEN : 'rgba(204,204,220,0.4)';
-      }
-      prev = { t, tokens: j.tokens };
-    } catch { /* server away; the status line already says so */ }
-  };
-  sample();
-  setInterval(sample, 1000);
 }
-let plotsLive: uPlot | null = null;
+
+// Called with each summary (WS push or fallback fetch); derives the token rate
+// from the change in cumulative tokens since the previous summary.
+function feedLive(totalTokens: number, tSec: number) {
+  if (!plotsLive) return;
+  if (livePrev && tSec > livePrev.t) {
+    const rate = Math.max(0, (totalTokens - livePrev.tokens) / (tSec - livePrev.t));
+    liveXs.push(tSec);
+    liveYs.push(rate);
+    if (liveXs.length > LIVE_POINTS) { liveXs.shift(); liveYs.shift(); }
+    plotsLive.setData([liveXs, liveYs] as uPlot.AlignedData);
+    if (liveRateEl) {
+      liveRateEl.textContent = rate > 0 ? `▲ ${fmtTok(rate)}/s` : 'idle';
+      liveRateEl.style.color = rate > 0 ? GREEN : 'rgba(204,204,220,0.4)';
+    }
+  }
+  livePrev = { t: tSec, tokens: totalTokens };
+}
 
 async function tick() {
   try {
