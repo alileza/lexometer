@@ -8,10 +8,13 @@ interface Row { t: number; metric: string; labels: Record<string, string>; value
 interface Summary { rows: Row[]; metrics: string[]; lastReceived: number; now: number }
 
 // Grafana classic palette, fixed assignment per token type
-const GREEN = '#73BF69', BLUE = '#5794F2', YELLOW = '#FADE2A', ORANGE = '#FF9830', RED = '#F2495C';
+const GREEN = '#73BF69', BLUE = '#5794F2', YELLOW = '#FADE2A', ORANGE = '#FF9830',
+      RED = '#F2495C', PURPLE = '#B877D9';
 const TOKEN_TYPES: [string, string][] = [
   ['cacheRead', BLUE], ['cacheCreation', GREEN], ['output', YELLOW], ['input', ORANGE],
 ];
+// distinct models get palette slots in first-seen sorted order, stable across renders
+const MODEL_PALETTE = [GREEN, BLUE, YELLOW, ORANGE, RED, PURPLE, '#37872D', '#1F60C4'];
 const TEXT_DIM = 'rgba(204,204,220,0.65)';
 const GRID = 'rgba(204,204,220,0.07)';
 const HOUR = 3600;
@@ -28,6 +31,11 @@ const fmtTok = (v: number | null) =>
   v >= 1e9 ? (v / 1e9).toFixed(2) + ' B' : v >= 1e6 ? (v / 1e6).toFixed(1) + ' M' :
   v >= 1e3 ? (v / 1e3).toFixed(1) + ' K' : String(Math.round(v));
 const day = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+const fmtDur = (sec: number) => {
+  if (sec < 60) return Math.round(sec) + 's';
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+};
 
 // ---- time range picker (Grafana-style presets) ----
 const RANGES: [string, number][] = [['6h', 6 * HOUR], ['24h', 24 * HOUR], ['7d', 7 * 86400], ['30d', 30 * 86400], ['All', 0]];
@@ -133,7 +141,8 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
       label: d.label,
       stroke: d.color,
       width: 2,
-      points: { show: false },
+      // sparse series need visible markers, like Grafana's auto point display
+      points: { show: data[0].length <= 60, size: 5, fill: d.color },
       ...(d.fill ? { fill: d.color + '2e' } : {}), // ~18% alpha fill, Grafana default look
       ...(d.bars ? { paths: uPlot.paths.bars!({ size: [0.6, 100] }), fill: d.color + '99' } : {}),
     })),
@@ -148,7 +157,11 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
       drag: { x: true, y: false },
       points: { size: 6, width: 2 },
     },
-    scales: { x: { time: true } },
+    scales: {
+      x: { time: true },
+      // counters are zero-based; pad the top so peaks don't kiss the frame
+      y: { range: (_u, _min, max) => [0, Math.max(max * 1.15, 1)] },
+    },
     axes: axisDefaults(fmt),
     plugins: [tooltipPlugin(fmt)],
   };
@@ -159,6 +172,45 @@ function chartPanel(parent: Element, title: string, desc: string, data: uPlot.Al
 
 function statPanel(value: string, label: string, cls = ''): string {
   return `<div class="panel stat-panel"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
+}
+
+// Grafana-style donut: SVG arcs + center total + legend with values and shares.
+function donutPanel(parent: Element, title: string, desc: string,
+                    slices: [string, number, string][], fmt: (v: number | null) => string): void {
+  const total = slices.reduce((a, s) => a + s[1], 0);
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const R = 56, CX = 70, CY = 70, W2 = 16;
+  let angle = -Math.PI / 2;
+  let arcs = '';
+  for (const [label, value, color] of slices) {
+    if (value <= 0 || total <= 0) continue;
+    const frac = value / total;
+    const a0 = angle, a1 = angle + frac * 2 * Math.PI;
+    angle = a1;
+    // 2px gap between arcs unless a slice is the whole ring
+    const gap = slices.filter(s => s[1] > 0).length > 1 ? 0.03 : 0;
+    const b0 = a0 + gap, b1 = Math.max(a1 - gap, b0 + 0.01);
+    const large = b1 - b0 > Math.PI ? 1 : 0;
+    const x0 = CX + R * Math.cos(b0), y0 = CY + R * Math.sin(b0);
+    const x1 = CX + R * Math.cos(b1), y1 = CY + R * Math.sin(b1);
+    arcs += `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${R} ${R} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}"
+      fill="none" stroke="${color}" stroke-width="${W2}"><title>${label}: ${fmt(value)}</title></path>`;
+  }
+  const legend = slices.map(([label, value, color]) =>
+    `<div class="dl-row"><span class="sw" style="background:${color}"></span>` +
+    `<span class="nm" title="${label}">${label}</span><span class="vl">${fmt(value)}</span>` +
+    `<span class="pc">${total > 0 ? (value / total * 100).toFixed(1) : '0.0'}%</span></div>`).join('');
+  panel.innerHTML = `<div class="panel-title">${title} <span class="desc">${desc}</span></div>
+    <div class="panel-body"><div class="donut-wrap">
+    <svg width="140" height="140" viewBox="0 0 140 140" role="img" aria-label="${title}">
+      ${arcs}
+      <text x="${CX}" y="${CY - 2}" text-anchor="middle" fill="#ccccdc" font-size="17" font-weight="500" class="donut-center">${fmt(total)}</text>
+      <text x="${CX}" y="${CY + 15}" text-anchor="middle" fill="rgba(204,204,220,0.4)" font-size="10">total</text>
+    </svg>
+    <div class="donut-legend">${legend}</div>
+    </div></div>`;
+  parent.appendChild(panel);
 }
 
 let lastSummary: Summary | null = null;
@@ -189,7 +241,11 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   const isCost = (r: Row) => r.metric === 'claude_code.cost.usage';
   const isTok = (r: Row) => r.metric === 'claude_code.token.usage';
   const isSession = (r: Row) => r.metric === 'claude_code.session.count';
+  const isActive = (r: Row) => r.metric === 'claude_code.active_time.total';
   const today = day(s.now);
+  const model = (r: Row) => r.labels['model'] ?? 'unknown';
+  const models = [...new Set(rows.filter(isCost).map(model))].sort();
+  const modelColor = new Map(models.map((m, i) => [m, MODEL_PALETTE[i % MODEL_PALETTE.length]!]));
 
   // time window from range preset
   const rangeSec = RANGES.find(r => r[0] === activeRange)![1];
@@ -203,11 +259,27 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
     + statPanel(fmtUSD(sum(rows, r => isCost(r) && day(r.t) === today)), 'cost today', 'blue')
     + statPanel(fmtTok(sum(rows, isTok)), 'total tokens')
     + statPanel(String(Math.round(sum(rows, isSession))), 'sessions')
+    + statPanel(fmtDur(sum(rows, r => isActive(r) && day(r.t) === today)), 'active time today')
     + `</div>`;
 
   chartPanel(app, 'Cost', `USD per hour · ${activeRange}`,
     hourly(inRange, tMin, tMax, [isCost]),
     [{ label: 'cost', color: GREEN, fill: true }], fmtUSD);
+
+  // model breakdown: share donut + per-model series, Grafana-dashboard style
+  const halfRow = document.createElement('div');
+  halfRow.className = 'row half';
+  app.appendChild(halfRow);
+  donutPanel(halfRow, 'Cost by model', 'share of total recorded cost',
+    models.map(m => [m, sum(rows, r => isCost(r) && model(r) === m), modelColor.get(m)!]), fmtUSD);
+  donutPanel(halfRow, 'Tokens by type', 'share of all tokens recorded',
+    TOKEN_TYPES.map(([n, c]) => [n, sum(rows, r => isTok(r) && r.labels['type'] === n), c]), fmtTok);
+
+  if (models.length > 0) {
+    chartPanel(app, 'Cost by model', `USD per hour per model · ${activeRange}`,
+      hourly(inRange, tMin, tMax, models.map(m => (r: Row) => isCost(r) && model(r) === m)),
+      models.map(m => ({ label: m, color: modelColor.get(m)!, fill: true })), fmtUSD, 180);
+  }
 
   chartPanel(app, 'Token usage', `tokens per hour by type · ${activeRange}`,
     hourly(inRange, tMin, tMax, TOKEN_TYPES.map(([n]) => (r: Row) => isTok(r) && r.labels['type'] === n)),
@@ -216,6 +288,10 @@ Flip <code>skills_enabled</code> to <code>true</code> when you enable an interve
   chartPanel(app, 'Sessions', `sessions started per hour · ${activeRange}`,
     hourly(inRange, tMin, tMax, [isSession]),
     [{ label: 'sessions', color: BLUE, bars: true }], v => v == null ? '–' : String(Math.round(v)), 140);
+
+  chartPanel(app, 'Active time', `seconds of active Claude Code use per hour · ${activeRange}`,
+    hourly(inRange, tMin, tMax, [isActive]),
+    [{ label: 'active', color: PURPLE, fill: true }], v => v == null ? '–' : fmtDur(v), 140);
 
   // before/after comparison when both phases have data
   const phases = [...new Set(rows.map(r => r.labels['skills_enabled']).filter(Boolean))];
