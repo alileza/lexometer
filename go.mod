@@ -1,3 +1,3 @@
-module github.com/alileza/claudewatch
+module github.com/alileza/lexometer
 
 go 1.26.3

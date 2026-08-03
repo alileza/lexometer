@@ -99,7 +99,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	fmt.Printf(`claudewatch — dashboard on http://localhost%[1]s
+	fmt.Printf(`lexometer — dashboard on http://localhost%[1]s
 
 Point Claude Code at it (add to your shell profile):
 
@@ -117,9 +117,9 @@ Data file: %[2]s
 func defaultDataPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "claudewatch.json"
+		return "lexometer.json"
 	}
-	return filepath.Join(home, ".claudewatch", "data.json")
+	return filepath.Join(home, ".lexometer", "data.json")
 }
 
 func readBody(r *http.Request) ([]byte, error) {

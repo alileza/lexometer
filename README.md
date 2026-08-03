@@ -1,18 +1,18 @@
-# claudewatch
+# lexometer
 
 A single binary that watches your Claude Code usage. It speaks OTLP natively —
 no Prometheus, no Grafana, no Docker, no collector. One process, one port, one
 dashboard.
 
 ```
-Claude Code ──OTLP/HTTP──▶ claudewatch ──▶ http://localhost:4318
+Claude Code ──OTLP/HTTP──▶ lexometer ──▶ http://localhost:4318
 ```
 
 ## Install
 
 ```bash
-go install github.com/alileza/claudewatch@latest
-claudewatch
+go install github.com/alileza/lexometer@latest
+lexometer
 ```
 
 Then enable Claude Code's built-in telemetry (add to your shell profile):
@@ -39,7 +39,7 @@ percent change — your own measured number, not a vendor claim.
 
 ## Details
 
-- Data is stored in `~/.claudewatch/data.json` (override with `-data`), bucketed
+- Data is stored in `~/.lexometer/data.json` (override with `-data`), bucketed
   hourly. Cumulative OTLP sums are converted to deltas per session stream, so
   session restarts don't double-count.
 - Listens on `:4318` (the OTLP/HTTP default; override with `-addr`). `/v1/logs`
@@ -54,7 +54,7 @@ percent change — your own measured number, not a vendor claim.
 
 [claude-otlp-example](https://github.com/alileza/claude-otlp-example) does the
 same job with the full stack — collector, Prometheus, Grafana, three containers.
-It works, but it's a lot of machinery for one person's usage metrics. claudewatch
+It works, but it's a lot of machinery for one person's usage metrics. lexometer
 is the same telemetry with none of the operational surface.
 
 ## License

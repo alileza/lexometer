@@ -1,4 +1,4 @@
-// claudewatch dashboard — fetches /api/summary and renders SVG charts.
+// lexometer dashboard — fetches /api/summary and renders SVG charts.
 
 interface Row { t: number; metric: string; labels: Record<string, string>; value: number }
 interface Summary { rows: Row[]; metrics: string[]; lastReceived: number; now: number }
@@ -99,7 +99,7 @@ function render(s: Summary) {
     : `last data ${Math.max(0, s.now - s.lastReceived)}s ago`;
 
   if (rows.length === 0) {
-    app.innerHTML = `<div id="empty"><strong>No telemetry yet.</strong> Point Claude Code at claudewatch and start a session:
+    app.innerHTML = `<div id="empty"><strong>No telemetry yet.</strong> Point Claude Code at lexometer and start a session:
 <pre>export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export OTEL_METRICS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
@@ -175,7 +175,7 @@ async function tick() {
     render(await res.json() as Summary);
   } catch {
     statusEl.className = '';
-    statusText.textContent = 'claudewatch unreachable';
+    statusText.textContent = 'lexometer unreachable';
   }
 }
 
