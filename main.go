@@ -79,6 +79,36 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(attr.Compute(20))
 	})
+	// Session pruning: list transcripts with prunable image bloat, and prune/restore
+	// them so a resumed session replays less context. Mutating endpoints validate the
+	// path and refuse recently-touched (possibly open) sessions; each prune keeps a .bak.
+	scanner := newSessionScanner()
+	mux.HandleFunc("GET /api/sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(scanner.List(time.Now().Unix()))
+	})
+	pruneAction := func(action func(string) (PruneResult, error)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			res, err := action(req.Path)
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(res)
+		}
+	}
+	mux.HandleFunc("POST /api/prune", pruneAction(scanner.Prune))
+	mux.HandleFunc("POST /api/restore", pruneAction(scanner.Restore))
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
 	mux.HandleFunc("GET /dist/", func(w http.ResponseWriter, r *http.Request) {
