@@ -77,6 +77,7 @@ type tLine struct {
 	Type        string   `json:"type"`
 	Timestamp   string   `json:"timestamp"`
 	SessionID   string   `json:"sessionId"`
+	Cwd         string   `json:"cwd"`
 	IsSidechain bool     `json:"isSidechain"`
 	IsMeta      bool     `json:"isMeta"`
 	Message     tMessage `json:"message"`
@@ -216,6 +217,8 @@ func (w *Watcher) assistant(tl *tLine, ts int64) {
 			w.store.Add(tokenMetric, map[string]string{"type": p.typ, "model": model}, ts, p.val, false)
 		}
 	}
+	// all-time context-per-request series (input + cache sent on this call)
+	w.store.AddCtx(ts/int64(time.Second), u.Input+u.CacheRead+u.CacheCreate)
 	// track tool_use names so the following tool_result events can be labelled
 	for _, b := range contentBlocks(tl.Message.Content) {
 		if b.Type == "tool_use" && b.ID != "" {
@@ -243,12 +246,13 @@ func (w *Watcher) user(tl *tLine, ts int64) {
 	if len(content) == 0 {
 		return
 	}
+	project := projectName(tl.Cwd)
 	// A plain typed prompt is either a JSON string or an array of text blocks.
 	// An array carrying tool_result blocks is tool output, not a prompt.
 	if content[0] == '"' {
 		var s string
 		if json.Unmarshal(content, &s) == nil && s != "" {
-			w.emitPrompt(tl.SessionID, ts, s)
+			w.emitPrompt(tl.SessionID, project, ts, s)
 		}
 		return
 	}
@@ -277,19 +281,39 @@ func (w *Watcher) user(tl *tLine, ts int64) {
 		}
 	}
 	if !isToolResult && text != "" {
-		w.emitPrompt(tl.SessionID, ts, text)
+		w.emitPrompt(tl.SessionID, project, ts, text)
 	}
 }
 
-func (w *Watcher) emitPrompt(session string, ts int64, text string) {
+func (w *Watcher) emitPrompt(session, project string, ts int64, text string) {
 	if len(text) > 300 {
 		text = text[:300]
 	}
 	w.haveEv = true
 	w.store.AddEvent(Event{
 		T: ts / 1e6, Session: session, Name: "user_prompt",
-		Attrs: map[string]string{"prompt": text, "prompt_length": strconv.Itoa(len(text))},
+		Attrs: map[string]string{
+			"prompt": text, "prompt_length": strconv.Itoa(len(text)),
+			"project": project, "session_short": shortID(session),
+		},
 	})
+}
+
+// projectName is the human-friendly project for a prompt — the last path segment
+// of the session's working directory (e.g. "/Users/x/Projects/skills" -> "skills").
+func projectName(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return filepath.Base(cwd)
+}
+
+// shortID is a fallback identifier when there's no cwd: the session UUID's head.
+func shortID(session string) string {
+	if len(session) > 8 {
+		return session[:8]
+	}
+	return session
 }
 
 func contentBlocks(raw json.RawMessage) []tBlock {

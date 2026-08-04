@@ -62,6 +62,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(store.Events())
 	})
+	// all-time context-per-request series (downsampled), independent of the
+	// ring-buffered event log so the chart spans the whole history.
+	mux.HandleFunc("GET /api/context", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.ContextSeries(3000))
+	})
 	attr := newAttrCache()
 	mux.HandleFunc("GET /api/attribution", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

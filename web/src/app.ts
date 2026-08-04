@@ -230,6 +230,7 @@ let lastSummary: Summary | null = null;
 // ---- per-prompt performance from telemetry log events ----
 interface Ev { t: number; session: string; name: string; attrs: Record<string, string> }
 let eventsCache: Ev[] = [];
+let contextSeries: [number, number][] = []; // [unix seconds, context tokens], all history
 let evPlots: uPlot[] = [];
 let promptSort: 'cost' | 'recent' = 'cost';
 
@@ -249,8 +250,9 @@ const hhmmss = (ms: number) => new Date(ms).toLocaleTimeString();
 
 async function refreshEvents() {
   try {
-    const r = await fetch('/api/events');
-    eventsCache = (await r.json() as Ev[] | null) ?? [];
+    const [evR, ctxR] = await Promise.all([fetch('/api/events'), fetch('/api/context')]);
+    eventsCache = (await evR.json() as Ev[] | null) ?? [];
+    contextSeries = (await ctxR.json() as [number, number][] | null) ?? [];
     renderEvents();
     renderSetup();
   } catch { /* server away */ }
@@ -296,20 +298,20 @@ function renderEvents() {
     return;
   }
 
-  const ctxOf = (a: Record<string, string>) =>
-    num(a, 'input_tokens') + num(a, 'cache_read_tokens') + num(a, 'cache_creation_tokens');
-
-  // context build-up: tokens sent per API request — the staircase you pay for
-  const recent = reqs.slice(-300);
-  evPlots.push(chartPanel(root, 'Context sent per request',
-    'input + cache tokens on each API call — how the context builds up',
-    [recent.map(e => e.t / 1000), recent.map(e => ctxOf(e.attrs))] as uPlot.AlignedData,
-    [{ label: 'context tokens', color: ORANGE, fill: true }], fmtTok, 180));
+  // context build-up: tokens sent per API request across ALL history — the
+  // staircase you pay for. Sourced from /api/context (uncapped, downsampled), not
+  // the ring-buffered event log, so it isn't limited to the last few hours.
+  if (contextSeries.length > 0) {
+    evPlots.push(chartPanel(root, 'Context sent per request',
+      'input + cache tokens on each API call, all history — how the context builds up',
+      [contextSeries.map(p => p[0]), contextSeries.map(p => p[1])] as uPlot.AlignedData,
+      [{ label: 'context tokens', color: ORANGE, fill: true }], fmtTok, 180));
+  }
 
   // group api_requests + tool events under the user_prompt that caused them, per session
   interface Req { cr: number; cc: number; inp: number; out: number; tools: string[] }
   interface Group {
-    t: number; text: string; len: number; calls: number;
+    t: number; text: string; len: number; calls: number; project: string;
     cr: number; cc: number; inp: number; out: number; tools: Map<string, number>;
     reqs: Req[]; pendingTools: string[];
   }
@@ -319,6 +321,7 @@ function renderEvents() {
     if (e.name.includes('user_prompt')) {
       const g: Group = {
         t: e.t, text: promptText(e.attrs), len: num(e.attrs, 'prompt_length'),
+        project: e.attrs['project'] || e.attrs['session_short'] || '',
         calls: 0, cr: 0, cc: 0, inp: 0, out: 0, tools: new Map(),
         reqs: [], pendingTools: [],
       };
@@ -401,8 +404,9 @@ function renderEvents() {
 
   // headline lesson: name the single most expensive prompt and why
   const topLabel = top.text ? `“${esc(top.text.slice(0, 54))}${top.text.length > 54 ? '…' : ''}”` : `a ${top.len}-char prompt`;
+  const topProject = top.project ? ` <span style="color:var(--text-dim)">in <span style="font-family:var(--mono)">${esc(top.project)}</span></span>` : '';
   const headline = `<div style="background:rgba(242,73,92,0.08);border:1px solid rgba(242,73,92,0.25);border-radius:3px;padding:10px 12px;margin-bottom:10px;font-size:13px">
-    <span style="color:${RED};font-weight:600">Most expensive prompt:</span> ${topLabel}
+    <span style="color:${RED};font-weight:600">Most expensive prompt:</span> ${topLabel}${topProject}
     — <span style="font-family:var(--mono)">${fmtTok(total(top))}</span> tokens (${topShare.toFixed(0)}% of all prompt spend).
     <span style="color:var(--text-dim)">${reason(top).text}.</span></div>`;
 
@@ -419,7 +423,7 @@ function renderEvents() {
         <td class="num" style="color:${YELLOW}">out ${fmtTok(rq.out)}</td>
       </tr>`;
     }).join('');
-    return `<tr class="detail" style="display:none"><td colspan="5" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
+    return `<tr class="detail" style="display:none"><td colspan="6" style="padding:0"><table style="width:100%">${rows}</table></td></tr>`;
   };
 
   const rowHTML = (g: Group): string => {
@@ -432,7 +436,8 @@ function renderEvents() {
     return `<tr class="prow" style="cursor:pointer;${expensive ? `box-shadow:inset 3px 0 0 ${RED}` : ''}">
       <td class="num" style="color:var(--text-faint)">#${rank}</td>
       <td style="white-space:nowrap">${live ? `<span style="color:${GREEN}">●</span> ` : ''}<span class="caret" style="color:var(--text-faint)">▸</span> ${hhmmss(g.t)}</td>
-      <td>${g.text ? esc(g.text.slice(0, 52)) + (g.text.length > 52 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
+      <td style="white-space:nowrap;color:var(--text-dim);font-family:var(--mono);font-size:11.5px">${g.project ? esc(g.project) : '—'}</td>
+      <td>${g.text ? esc(g.text.slice(0, 48)) + (g.text.length > 48 ? '…' : '') : `<span style="color:rgba(204,204,220,0.4)">${g.len} chars</span>`}</td>
       <td style="min-width:150px">
         <div style="display:flex;align-items:center;gap:8px">
           <div style="flex:1;height:14px;background:rgba(204,204,220,0.06);border-radius:2px;overflow:hidden;position:relative">
@@ -456,7 +461,7 @@ function renderEvents() {
       ${headline}
       <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:8px">${legend}</div>
       <table>
-      <tr><th class="num">#</th><th>Time</th><th>Prompt</th><th>Tokens · why</th><th>Tools</th></tr>
+      <tr><th class="num">#</th><th>Time</th><th>Project</th><th>Prompt</th><th>Tokens · why</th><th>Tools</th></tr>
       ${ordered.map(rowHTML).join('')}
       </table></div>`;
 

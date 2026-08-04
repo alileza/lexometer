@@ -24,6 +24,17 @@ type Store struct {
 
 	// recent reconstructed log events (user_prompt, api_request, …), oldest first
 	EventLog []Event
+
+	// context tokens (input+cache) per API request over ALL history — tiny points,
+	// kept uncapped (the event log is ring-buffered, so it can't back an all-time
+	// chart). Downsampled on read.
+	CtxSeries []CtxPoint
+}
+
+// CtxPoint is the context size sent on one API request.
+type CtxPoint struct {
+	T int64   // unix seconds
+	V float64 // input + cache-read + cache-creation tokens
 }
 
 // NewMemStore returns an in-memory store with no persistence.
@@ -101,6 +112,41 @@ func (s *Store) AddEvent(e Event) {
 	if len(s.EventLog) > maxEvents*12/10 {
 		s.EventLog = s.EventLog[len(s.EventLog)-maxEvents:]
 	}
+}
+
+// AddCtx records the context size of one API request (all-time series).
+func (s *Store) AddCtx(tsSec int64, v float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CtxSeries = append(s.CtxSeries, CtxPoint{T: tsSec, V: v})
+}
+
+// ContextSeries returns [t, v] pairs downsampled to at most maxPoints (uniform
+// stride, last point always kept) so an all-time chart stays light to render.
+func (s *Store) ContextSeries(maxPoints int) [][2]float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.CtxSeries)
+	out := [][2]float64{}
+	if n == 0 {
+		return out
+	}
+	// files are scanned alphabetically, so points arrive out of global time order;
+	// sort ascending before downsampling (uPlot requires ascending x).
+	pts := make([]CtxPoint, n)
+	copy(pts, s.CtxSeries)
+	sort.Slice(pts, func(i, j int) bool { return pts[i].T < pts[j].T })
+	stride := 1
+	if maxPoints > 0 && n > maxPoints {
+		stride = (n + maxPoints - 1) / maxPoints
+	}
+	for i := 0; i < n; i += stride {
+		out = append(out, [2]float64{float64(pts[i].T), pts[i].V})
+	}
+	if last := pts[n-1]; out[len(out)-1][0] != float64(last.T) {
+		out = append(out, [2]float64{float64(last.T), last.V})
+	}
+	return out
 }
 
 // SetActivity pins the dashboard's "live" / "last data Ns ago" indicators to the
