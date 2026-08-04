@@ -65,6 +65,7 @@ and tool content — and reading them means:
 -addr      listen address for the dashboard (default :4318)
 -projects  Claude Code projects dir to watch (default ~/.claude/projects)
 -poll      how often to re-scan transcripts for new activity (default 2s)
+-open      open the dashboard in your browser on start (default true; -open=false to disable)
 ```
 
 ## Details

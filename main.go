@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -26,6 +28,7 @@ func main() {
 	addr := flag.String("addr", ":4318", "listen address (dashboard)")
 	projects := flag.String("projects", defaultProjectsPath(), "Claude Code projects directory to watch")
 	poll := flag.Duration("poll", 2*time.Second, "how often to re-scan transcripts for new activity")
+	open := flag.Bool("open", true, "open the dashboard in your browser on start")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -102,12 +105,52 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; os.Exit(0) }()
 
-	fmt.Printf(`tokometer — dashboard on http://localhost%[1]s
+	url := dashboardURL(*addr)
+	fmt.Printf(`tokometer — dashboard on %[1]s
 
 Reading Claude Code sessions from %[2]s
 No setup, no telemetry exporter — metrics come straight from the transcript files.
-`, *addr, *projects)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+`, url, *projects)
+
+	// Bind first so we fail fast on a taken port and only open the browser once
+	// the socket is actually accepting connections.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("cannot listen on %s: %v", *addr, err)
+	}
+	if *open {
+		go openBrowser(url)
+	}
+	log.Fatal(http.Serve(ln, mux))
+}
+
+// dashboardURL turns a listen address (":4318", "0.0.0.0:4318") into a URL a
+// browser can open, defaulting a bare/wildcard host to localhost.
+func dashboardURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://localhost" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// openBrowser best-effort opens url in the default browser; failure is silent
+// (headless boxes, no browser) since the dashboard is reachable regardless.
+func openBrowser(url string) {
+	var cmd string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd, args = "open", []string{url}
+	case "windows":
+		cmd, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
+	default:
+		cmd, args = "xdg-open", []string{url}
+	}
+	_ = exec.Command(cmd, args...).Start()
 }
 
 func defaultProjectsPath() string {

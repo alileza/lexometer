@@ -54,6 +54,7 @@ release:
 # default GITHUB_TOKEN.
 brews:
   - name: tokometer
+    directory: Formula
     repository:
       owner: alileza
       name: homebrew-tap
